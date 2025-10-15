@@ -3,6 +3,7 @@ import re
 import json
 import logging
 import time
+import uuid
 import streamlit as st
 import google.generativeai as genai
 
@@ -29,12 +30,54 @@ DATA_EVIDENCE_GUIDE = (
     "- 가능한 경우 간단한 표나 지표 수치를 활용해 근거를 명확히 보여주세요."
 )
 
+STRUCTURED_RESPONSE_GUIDE = (
+    "\n\n응답 형식 지침(중요):\n"
+    "1. 반드시 백틱이나 주석 없이 순수 JSON만 출력하세요.\n"
+    "2. JSON은 아래 스키마를 따르세요.\n"
+    "{\n"
+    '  \"objective\": \"최우선 마케팅 목표를 1문장으로 요약\",\n'
+    '  \"phase_titles\": [\"Phase 1: …\", \"Phase 2: …\", \"Phase 3: …\"],\n'
+    '  \"channel_summary\": [\n'
+    '    {\n'
+    '      \"channel\": \"채널명\",\n'
+    '      \"phase_title\": \"연결된 Phase 제목\",\n'
+    '      \"reason\": \"추천 이유와 기대 효과\",\n'
+    '      \"data_evidence\": \"관련 수치/규칙 등 데이터 근거\"\n'
+    "    }\n"
+    "  ],\n"
+    '  \"phases\": [\n'
+    "    {\n"
+    '      \"title\": \"Phase 1: …\",\n'
+    '      \"goal\": \"구체적인 목표\",\n'
+    '      \"focus_channels\": [\"핵심 채널 1\", \"핵심 채널 2\"],\n'
+    '      \"actions\": [\n'
+    "        {\n"
+    '          \"task\": \"체크박스에 들어갈 실행 항목\",\n'
+    '          \"owner\": \"담당 역할(예: 점주, 스태프)\",\n'
+    '          \"supporting_data\": \"선택) 관련 데이터 근거\"\n'
+    "        }\n"
+    "      ],\n"
+    '      \"metrics\": [\"성과 KPI\"],\n'
+    '      \"next_phase_criteria\": [\"다음 Phase로 넘어가기 위한 정량/정성 기준\"],\n'
+    '      \"data_evidence\": [\"Phase 전략을 뒷받침하는 근거\"]\n'
+    "    }\n"
+    "  ],\n"
+    '  \"risks\": [\"주요 리스크와 대응 요약\"],\n'
+    '  \"monitoring_cadence\": \"모니터링 주기와 책임자\"\n'
+    "}\n"
+    "3. Phase는 시간 순서를 지키고 Phase 1의 action 항목은 최소 3개를 포함하세요.\n"
+    "4. 모든 reason, supporting_data, data_evidence에는 정량 수치나 규칙적 근거를 명시하세요."
+)
+
 
 def ensure_data_evidence(prompt: str) -> str:
     """프롬프트에 데이터 근거 지침이 없으면 추가."""
-    if "데이터 근거" in prompt:
-        return prompt
-    return prompt.rstrip() + DATA_EVIDENCE_GUIDE
+    updated = prompt.rstrip()
+    if "데이터 근거" not in updated:
+        updated += DATA_EVIDENCE_GUIDE
+    if '"phase_titles"' not in updated and "응답 형식 지침(중요)" not in updated:
+        updated += STRUCTURED_RESPONSE_GUIDE
+    return updated
 
 
 def extract_executive_summary(markdown_text: str, max_points: int = 4):
@@ -90,6 +133,140 @@ def extract_executive_summary(markdown_text: str, max_points: int = 4):
                 break
 
     return summary_lines
+
+
+def strip_json_artifacts(text: str) -> str:
+    """스트리밍 중 섞일 수 있는 불필요한 문자를 제거하고 순수 JSON 문자열만 남긴다."""
+    cleaned = text.strip().replace("▌", "")
+    fence_pattern = re.compile(r"^```(?:json)?\s*|\s*```$")
+    cleaned = fence_pattern.sub("", cleaned)
+    return cleaned.strip()
+
+
+def parse_strategy_payload(raw_text: str):
+    """JSON 응답을 안전하게 파싱. 실패 시 None."""
+    candidate = strip_json_artifacts(raw_text)
+    if not candidate:
+        return None
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+
+
+def render_strategy_payload(payload: dict, container, prefix: str = "latest"):
+    """구조화된 전략 응답을 Streamlit 컴포넌트로 시각화."""
+    objective = payload.get("objective")
+    if objective:
+        container.markdown("### 🎯 Objective")
+        container.markdown(objective)
+
+    phase_titles = payload.get("phase_titles") or []
+    channel_summary = payload.get("channel_summary") or []
+    if channel_summary:
+        container.markdown("### 📊 Recommended Channels & Phase Titles")
+        summary_lines = []
+        for item in channel_summary:
+            channel = item.get("channel", "채널 미지정")
+            phase_title = item.get("phase_title", "Phase 미지정")
+            reason = item.get("reason", "")
+            evidence = item.get("data_evidence", "")
+            detail = f"- **{channel}** → {phase_title}: {reason}"
+            if evidence:
+                detail += f" _(근거: {evidence})_"
+            summary_lines.append(detail)
+        container.markdown("\n".join(summary_lines))
+        if phase_titles:
+            container.markdown("**Phase Titles:** " + ", ".join(phase_titles))
+    elif phase_titles:
+        container.markdown("### 📋 Phase Titles")
+        container.markdown(", ".join(phase_titles))
+
+    phases = payload.get("phases") or []
+    if not phases:
+        return
+
+    # Phase 1 우선 표시
+    phase1 = phases[0]
+    phase1_container = container.container()
+    phase1_container.markdown(f"### 🚀 {phase1.get('title', 'Phase 1')}")
+    goal = phase1.get("goal")
+    if goal:
+        phase1_container.markdown(f"**Goal:** {goal}")
+    focus_channels = phase1.get("focus_channels") or []
+    if focus_channels:
+        phase1_container.markdown("**Focus Channels:** " + ", ".join(focus_channels))
+
+    actions = phase1.get("actions") or []
+    if actions:
+        phase1_container.markdown("**Action Checklist:**")
+        for idx, action in enumerate(actions):
+            label = action.get("task", f"Action {idx + 1}")
+            owner = action.get("owner")
+            support = action.get("supporting_data")
+            help_parts = []
+            if owner:
+                help_parts.append(f"담당: {owner}")
+            if support:
+                help_parts.append(f"근거: {support}")
+            help_text = " | ".join(help_parts) if help_parts else None
+            checkbox_key = f"{prefix}_phase1_action_{idx}"
+            phase1_container.checkbox(label, key=checkbox_key, help=help_text)
+
+    metrics = phase1.get("metrics") or []
+    if metrics:
+        phase1_container.markdown("**Metrics:**")
+        phase1_container.markdown("\n".join(f"- {m}" for m in metrics))
+
+    criteria = phase1.get("next_phase_criteria") or []
+    if criteria:
+        phase1_container.markdown("**Criteria To Advance:**")
+        phase1_container.markdown("\n".join(f"- {c}" for c in criteria))
+
+    evidence = phase1.get("data_evidence") or []
+    if evidence:
+        phase1_container.markdown("**Data Evidence:**")
+        phase1_container.markdown("\n".join(f"- {e}" for e in evidence))
+
+    # 나머지 Phase는 Expander로 표시
+    for idx, phase in enumerate(phases[1:], start=2):
+        title = phase.get("title", f"Phase {idx}")
+        expander = container.expander(title, expanded=False)
+        goal = phase.get("goal")
+        if goal:
+            expander.markdown(f"**Goal:** {goal}")
+        focus_channels = phase.get("focus_channels") or []
+        if focus_channels:
+            expander.markdown("**Focus Channels:** " + ", ".join(focus_channels))
+
+        actions = phase.get("actions") or []
+        if actions:
+            expander.markdown("**Key Actions:**")
+            expander.markdown("\n".join(f"- [ ] {act.get('task', '작업 미정')}" for act in actions))
+
+        metrics = phase.get("metrics") or []
+        if metrics:
+            expander.markdown("**Metrics:**")
+            expander.markdown("\n".join(f"- {m}" for m in metrics))
+
+        criteria = phase.get("next_phase_criteria") or []
+        if criteria:
+            expander.markdown("**Criteria To Advance:**")
+            expander.markdown("\n".join(f"- {c}" for c in criteria))
+
+        evidence = phase.get("data_evidence") or []
+        if evidence:
+            expander.markdown("**Data Evidence:**")
+            expander.markdown("\n".join(f"- {e}" for e in evidence))
+
+    risks = payload.get("risks") or []
+    monitoring_cadence = payload.get("monitoring_cadence")
+    if risks or monitoring_cadence:
+        container.markdown("### ⚠️ Risks & Monitoring")
+        if risks:
+            container.markdown("\n".join(f"- {r}" for r in risks))
+        if monitoring_cadence:
+            container.markdown(f"**Monitoring Cadence:** {monitoring_cadence}")
 
 # ─────────────────────────────
 # 2. Persona 데이터 로드
@@ -175,13 +352,6 @@ def stream_gemini(
     """안정적인 스트리밍 + 완료사유 점검 + 친절한 에러"""
     status_placeholder = st.empty()
     status_placeholder.info("전략을 생성중입니다... ⏳")
-
-    status_messages = [
-        "1/4 시장 및 경쟁 데이터를 검토하고 있어요...",
-        "2/4 딱 맞는 마케팅 채널을 조사하고 있어요...",
-        "3/4 실행 가능한 전략 아이디어를 조합하는 중이에요...",
-        "4/4 전달할 내용을 정돈하고 있어요...",
-    ]
     step_interval = 2.0
     step_state = {"idx": 0, "next_time": time.time() + step_interval}
 
@@ -197,19 +367,11 @@ def stream_gemini(
         stream = gmodel.generate_content(prompt, generation_config=cfg, stream=True)
 
         placeholder = output_placeholder or st.empty()
+        placeholder.info("AI가 전략을 정리하고 있어요... 📋")
         full_text = ""
 
         # 1) 스트리밍 수집 (chunk.text가 없을 수도 있으니 candidates도 확인)
         for event in stream:
-            now = time.time()
-            if step_state["idx"] < len(status_messages) and now >= step_state["next_time"]:
-                status_placeholder.info(
-                    "전략을 생성중입니다... ⏳\n\n"
-                    f"{status_messages[step_state['idx']]}"
-                )
-                step_state["idx"] += 1
-                step_state["next_time"] = now + step_interval
-
             piece = ""
             if getattr(event, "text", None):
                 piece = event.text
@@ -224,8 +386,6 @@ def stream_gemini(
 
             if piece:
                 full_text += piece
-                # 타이핑 커서 표시
-                placeholder.markdown(full_text + "▌")
 
         # 2) 최종 해석 (finish_reason/blocked 여부 확인)
         try:
@@ -234,7 +394,8 @@ def stream_gemini(
             # resolve에서 오류가 나도 본문이 있으면 계속 진행
             pass
 
-        placeholder.markdown(full_text or "_응답이 비어 있습니다._")
+        if not full_text:
+            placeholder.warning("응답이 비어 있습니다. 다시 시도해 주세요.")
 
         # finish_reason/blocked 안내
         try:
@@ -335,12 +496,24 @@ if not st.session_state.initialized:
 
 for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        if msg.get("type") == "strategy":
+            message_container = st.container()
+            render_strategy_payload(msg.get("data", {}), message_container, prefix=msg.get("id", "history"))
+        else:
+            st.markdown(msg["content"])
 
 user_input = st.chat_input("상점명을 입력하거나 질문에 답해주세요...")
 
-def add_message(role, content):
-    st.session_state.chat_history.append({"role": role, "content": content})
+def add_message(role, content=None, **kwargs):
+    message = {"role": role}
+    if kwargs.get("type") == "strategy":
+        message["type"] = "strategy"
+        message["data"] = kwargs.get("data", {})
+        message["id"] = kwargs.get("id", str(uuid.uuid4()))
+        message["raw"] = kwargs.get("raw")
+    else:
+        message["content"] = content if content is not None else ""
+    st.session_state.chat_history.append(message)
 
 # ─────────────────────────────
 # 8. 대화 로직
@@ -444,15 +617,30 @@ if user_input:
             content_placeholder = st.empty()
             result = stream_gemini(prompt, output_placeholder=content_placeholder)  # ⬅️ 스트리밍 출력
             if result:
-                summary_points = extract_executive_summary(result)
-                if summary_points:
-                    summary_markdown = "#### ⚡ 핵심 요약\n\n" + "\n".join(
-                        f"- {point}" for point in summary_points
-                    )
-                    combined_result = f"{summary_markdown}\n\n---\n\n{result}"
-                    content_placeholder.markdown(combined_result)
-                    st.session_state.chat_history.append(
-                        {"role": "assistant", "content": combined_result}
+                payload = parse_strategy_payload(result)
+                if payload:
+                    message_id = str(uuid.uuid4())
+                    content_placeholder.empty()
+                    strategy_container = st.container()
+                    render_strategy_payload(payload, strategy_container, prefix=message_id)
+                    add_message(
+                        "assistant",
+                        type="strategy",
+                        data=payload,
+                        id=message_id,
+                        raw=result,
                     )
                 else:
-                    st.session_state.chat_history.append({"role": "assistant", "content": result})
+                    summary_points = extract_executive_summary(result)
+                    if summary_points:
+                        summary_markdown = "#### ⚡ 핵심 요약\n\n" + "\n".join(
+                            f"- {point}" for point in summary_points
+                        )
+                        content_placeholder.markdown(summary_markdown)
+                        add_message("assistant", summary_markdown)
+                    else:
+                        fallback_notice = (
+                            "구조화된 응답을 표시하지 못했습니다. 다시 시도하거나 프롬프트를 조정해 주세요."
+                        )
+                        content_placeholder.warning(fallback_notice)
+                        add_message("assistant", fallback_notice)
