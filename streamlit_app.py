@@ -69,6 +69,22 @@ STRUCTURED_RESPONSE_GUIDE = (
     "4. 모든 reason, supporting_data, data_evidence에는 정량 수치나 규칙적 근거를 명시하세요."
 )
 
+FOLLOWUP_RESPONSE_GUIDE = (
+    "\n\n응답 형식 지침(중요):\n"
+    "1. 반드시 백틱이나 주석 없이 순수 JSON만 출력하세요.\n"
+    "2. JSON은 아래 스키마를 따르세요.\n"
+    "{\n"
+    '  "summary_points": ["핵심 요약 1", "핵심 요약 2"],\n'
+    '  "detailed_guidance": "요약을 확장하는 상세 조언",\n'
+    '  "evidence_mentions": ["관련 근거 또는 KPI 언급"],\n'
+    '  "suggested_question": "다음으로 이어질 간단한 한 문장 질문"\n'
+    "}\n"
+    "3. summary_points는 최대 2개, 각 항목은 한 문장으로 작성하고 중학생이 이해할 수 있는 쉬운 한국어를 사용하세요.\n"
+    "4. evidence_mentions는 최대 3개 이내의 불릿으로 작성하고, 숫자나 지표가 있다면 그대로 유지하세요.\n"
+    "5. detailed_guidance는 기존 전략을 재해석하며 데이터 근거를 그대로 인용하되 쉬운 어휘로 설명하세요.\n"
+    "6. suggested_question은 사용자가 바로 물어볼 수 있는 짧은 후속 질문 1개만 제안하세요."
+)
+
 
 def ensure_data_evidence(prompt: str) -> str:
     """프롬프트에 데이터 근거 지침이 없으면 추가."""
@@ -152,6 +168,121 @@ def parse_strategy_payload(raw_text: str):
         return json.loads(candidate)
     except json.JSONDecodeError:
         return None
+
+
+def parse_followup_payload(raw_text: str):
+    """후속 질의 응답용 JSON을 파싱."""
+    candidate = strip_json_artifacts(raw_text)
+    if not candidate:
+        return None
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+INFO_FIELD_ORDER = ["상점명", "점포연령", "고객연령대", "고객행동"]
+BUTTON_HINT = "\n\n필요한 정보가 아니어도 아래 '이대로 질문' 버튼을 누르면 지금 정보로 바로 답변을 드릴게요."
+DIRECT_RESPONSE_GUIDE = (
+    "\n\n답변 지침:\n"
+    "- 불릿 대신 1~2개의 짧은 단락으로 설명하세요.\n"
+    "- 중학생이 이해할 수 있는 쉬운 한국어를 사용하세요.\n"
+    "- 가능한 경우 숫자나 규칙 같은 근거를 문장 안에 직접 녹여 주세요.\n"
+    "- 실행 아이디어는 구체적인 예시와 함께 제시하세요."
+)
+
+
+def get_missing_info_fields(info: dict) -> list:
+    """필수 정보 중 아직 수집되지 않은 항목을 반환."""
+    missing = []
+    for field in INFO_FIELD_ORDER:
+        value = info.get(field)
+        if not value:
+            missing.append(field)
+    return missing
+
+
+def get_latest_strategy_message():
+    """세션 기록에서 가장 최신 전략 메시지를 반환."""
+    history = st.session_state.get("chat_history", [])
+    for item in reversed(history):
+        if item.get("type") == "strategy":
+            return item
+    return None
+
+
+def build_followup_prompt(question: str, info: dict, strategy_payload: dict, raw_strategy: str) -> str:
+    """이전 전략을 문맥으로 후속 질문에 답하기 위한 프롬프트 생성."""
+    info_keys = ["상점명", "업종", "프랜차이즈여부", "점포연령", "고객연령대", "고객행동"]
+    info_lines = [
+        f"- {key}: {info[key]}"
+        for key in info_keys
+        if key in info and info[key]
+    ]
+    info_block = "\n".join(info_lines) if info_lines else "- 추가 상점 정보 없음"
+
+    strategy_block = ""
+    if strategy_payload:
+        try:
+            strategy_block = json.dumps(strategy_payload, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            strategy_block = raw_strategy or ""
+    else:
+        strategy_block = raw_strategy or ""
+
+    prompt = (
+        "당신은 중소상공인을 돕는 시니어 마케팅 컨설턴트입니다.\n"
+        "이미 생성된 전략 내용을 기반으로 후속 질문에 답변하세요.\n"
+        "전략의 Phase, 채널, 실행 항목, 데이터 근거를 우선적으로 인용하고 필요 시 간단한 추가 조언을 더하세요.\n"
+        "새 전략을 새로 짜지 말고, 기존 전략을 재해석하거나 보완하는 방식으로 설명하세요.\n"
+        "모든 설명은 중학생이 이해할 수 있는 쉬운 한국어로 작성하세요.\n\n"
+        "=== 상점 기본 정보 ===\n"
+        f"{info_block}\n\n"
+        "=== 기존 전략(JSON) ===\n"
+        f"{strategy_block}\n\n"
+        "=== 사용자 질문 ===\n"
+        f"{question}\n\n"
+        "위 질문에 대해 전략 정보를 가장 신뢰할 수 있는 근거로 활용해 조언하세요.\n"
+        "데이터 근거 항목이나 KPI가 있다면 그대로 언급하거나 수치로 답변에 반영하세요."
+        f"{FOLLOWUP_RESPONSE_GUIDE}"
+    )
+    return prompt
+
+
+def build_direct_question_prompt(info: dict, question: str, missing_fields=None) -> str:
+    """수집된 정보만으로 직접 질문에 답하는 프롬프트 생성."""
+    missing_fields = missing_fields or []
+    info_lines = [
+        f"- {field}: {info[field]}"
+        for field in INFO_FIELD_ORDER
+        if info.get(field)
+    ]
+    info_block = "\n".join(info_lines) if info_lines else "- 제공된 정보 없음"
+
+    missing_note = ""
+    if missing_fields:
+        missing_note = (
+            "\n\n주의: 아직 다음 정보가 제공되지 않았습니다. "
+            + ", ".join(missing_fields)
+            + "."
+        )
+
+    prompt = (
+        "당신은 동네 상권을 돕는 시니어 마케팅 컨설턴트입니다.\n"
+        "아래 상점 정보를 참고해 사용자의 질문에 대해 바로 실행할 수 있는 조언을 주세요.\n"
+        "답변은 문단 형태로 작성하고, 필요한 경우 수치나 규칙 같은 근거를 문장 안에 녹여 설명하세요.\n"
+        "새로운 가정을 만들기보다는 제공된 정보를 우선적으로 활용하세요.\n\n"
+        "=== 상점 정보 ===\n"
+        f"{info_block}\n\n"
+        "=== 사용자 질문 ===\n"
+        f"{question}\n"
+        f"{missing_note}"
+        f"{DIRECT_RESPONSE_GUIDE}"
+    )
+    return prompt
 
 
 def render_strategy_payload(payload: dict, container, prefix: str = "latest"):
@@ -267,6 +398,53 @@ def render_strategy_payload(payload: dict, container, prefix: str = "latest"):
             container.markdown("\n".join(f"- {r}" for r in risks))
         if monitoring_cadence:
             container.markdown(f"**Monitoring Cadence:** {monitoring_cadence}")
+
+
+def render_followup_panel(guidance_text: str, evidence_list, suggested_question: str, ui_key: int):
+    """Follow-up 응답을 상세 가이드와 후속 질문 버튼으로 표시."""
+    if not guidance_text:
+        return
+
+    st.markdown("### 📘 상세 가이드")
+    st.markdown(guidance_text)
+
+    evidence_items = evidence_list or []
+    if evidence_items:
+        st.markdown("**근거:**")
+        st.markdown("\n".join(f"- {item}" for item in evidence_items))
+
+    first_time = not st.session_state.get("shown_followup_suggestion", False)
+    if first_time:
+        st.session_state.shown_followup_suggestion = True
+        if suggested_question:
+            st.markdown(f"**가능한 다음 질문:** {suggested_question}")
+
+    col1, col2 = st.columns(2)
+    suggestion_clicked = False
+    if suggested_question:
+        suggestion_clicked = col1.button(
+            suggested_question,
+            key=f"followup_suggest_{ui_key}",
+            use_container_width=True,
+            disabled=st.session_state.get("is_generating", False),
+        )
+    else:
+        col1.write("")
+    other_clicked = col2.button(
+        "다른 질문 입력",
+        key=f"followup_new_{ui_key}",
+        use_container_width=True,
+        disabled=st.session_state.get("is_generating", False),
+    )
+
+    if suggestion_clicked:
+        st.session_state.followup_ui = {}
+        st.session_state.auto_followup_question = suggested_question
+        st.rerun()
+
+    if other_clicked:
+        st.session_state.followup_ui = {}
+        st.rerun()
 
 # ─────────────────────────────
 # 2. Persona 데이터 로드
@@ -423,6 +601,87 @@ def is_franchise(name: str) -> bool:
     return False
 
 
+def _store_age_label_from_months(months: int) -> str:
+    if months <= 12:
+        return "신규"
+    if months <= 24:
+        return "전환기"
+    return "오래된"
+
+
+def extract_initial_store_info(text: str) -> tuple:
+    """복합 문장에서 상점 정보와 질문을 분리해 추출."""
+    info_updates = {}
+    question = None
+    if not text:
+        return info_updates, question
+
+    sentences = re.split(r"(?<=[?.!])\s+", text.strip())
+    info_sentences = []
+    question_sentences = []
+
+    for sentence in sentences:
+        stripped = sentence.strip()
+        if not stripped:
+            continue
+        if "?" in stripped or stripped.endswith("까요") or stripped.endswith("할 수 있을까요") or "어떻게" in stripped:
+            question_sentences.append(stripped)
+        else:
+            info_sentences.append(stripped)
+
+    if not question_sentences and info_sentences:
+        # 마지막 문장을 질문으로 간주
+        question_sentences.append(info_sentences.pop())
+
+    context_text = " ".join(info_sentences) if info_sentences else text.strip()
+    question = " ".join(question_sentences).strip() if question_sentences else text.strip()
+
+    normalized_no_space = _normalize_name(context_text)
+    brand_hits = [kw for kw in BRAND_KEYWORDS if kw in normalized_no_space]
+    if brand_hits:
+        store_name = max(brand_hits, key=len)
+        info_updates["상점명"] = store_name
+    else:
+        name_match = re.search(r"([가-힣A-Za-z0-9]+)(?:점)?(?:입니다|이에요|예요|에요)", context_text)
+        if name_match:
+            info_updates["상점명"] = name_match.group(1)
+
+    age_months = None
+    year_match = re.search(r"(\d+)\s*(?:년|년차|년째)", text)
+    month_match = re.search(r"(\d+)\s*(?:개월|달)", text)
+    if year_match:
+        age_months = int(year_match.group(1)) * 12
+    elif month_match:
+        age_months = int(month_match.group(1))
+
+    if age_months is not None:
+        info_updates["점포연령"] = _store_age_label_from_months(age_months)
+
+    if re.search(r"20\s*대", text):
+        info_updates["고객연령대"] = "20대 이하 고객 중심"
+    elif re.search(r"(?:30|40)\s*대", text):
+        info_updates["고객연령대"] = "30~40대 고객 중심"
+    elif re.search(r"(?:50|60)\s*대", text):
+        info_updates["고객연령대"] = "50대 이상 고객 중심"
+
+    behaviors = []
+    if "단골" in text or "재방문" in text:
+        behaviors.append("재방문 고객")
+    if "신규" in text or "새손님" in text or "새 손님" in text:
+        behaviors.append("신규 고객")
+    if "거주" in text or "주민" in text:
+        behaviors.append("거주 고객")
+    if "직장" in text or "오피스" in text or "회사" in text:
+        behaviors.append("직장인 고객")
+    if "유동" in text or "지나가는" in text or "관광" in text:
+        behaviors.append("유동 고객")
+
+    if behaviors:
+        info_updates["고객행동"] = " + ".join(sorted(set(behaviors)))
+
+    return info_updates, question
+
+
 # ─────────────────────────────
 # 5. Gemini Streaming 호출
 # ─────────────────────────────
@@ -435,10 +694,14 @@ def stream_gemini(
     temperature=0.6,
     max_tokens=65535,
     output_placeholder=None,
+    status_text="전략을 생성중입니다... ⏳",
+    progress_text="AI가 전략을 정리하고 있어요... 📋",
+    success_text="✅ 전략 생성이 완료되었습니다.",
+    error_status_text="🚨 전략 생성 중 오류가 발생했습니다.",
 ):
     """안정적인 스트리밍 + 완료사유 점검 + 친절한 에러"""
     status_placeholder = st.empty()
-    status_placeholder.info("전략을 생성중입니다... ⏳")
+    status_placeholder.info(status_text)
     step_interval = 2.0
     step_state = {"idx": 0, "next_time": time.time() + step_interval}
 
@@ -454,7 +717,7 @@ def stream_gemini(
         stream = gmodel.generate_content(prompt, generation_config=cfg, stream=True)
 
         placeholder = output_placeholder or st.empty()
-        placeholder.info("AI가 전략을 정리하고 있어요... 📋")
+        placeholder.info(progress_text)
         full_text = ""
 
         # 1) 스트리밍 수집 (chunk.text가 없을 수도 있으니 candidates도 확인)
@@ -500,11 +763,11 @@ def stream_gemini(
         elif fr == "SAFETY":
             st.warning("⚠️ 안전 필터로 일부 내용이 숨겨졌을 수 있어요. 표현을 다듬어 다시 시도해보세요.")
 
-        status_placeholder.success("✅ 전략 생성이 완료되었습니다.")
+        status_placeholder.success(success_text)
         return full_text
 
     except Exception as e:
-        status_placeholder.error("🚨 전략 생성 중 오류가 발생했습니다.")
+        status_placeholder.error(error_status_text)
         st.error(
             "🚨 Gemini 응답 생성 중 오류가 발생했습니다.\n\n"
             f"**에러 유형**: {type(e).__name__}\n"
@@ -570,6 +833,24 @@ if "info" not in st.session_state:
     st.session_state.info = {}
 if "initialized" not in st.session_state:
     st.session_state.initialized = False
+if "latest_strategy" not in st.session_state:
+    st.session_state.latest_strategy = {}
+if "followup_ui" not in st.session_state:
+    st.session_state.followup_ui = {}
+if "followup_ui_key" not in st.session_state:
+    st.session_state.followup_ui_key = 0
+if "auto_followup_question" not in st.session_state:
+    st.session_state.auto_followup_question = None
+if "shown_followup_suggestion" not in st.session_state:
+    st.session_state.shown_followup_suggestion = False
+if "pending_question" not in st.session_state:
+    st.session_state.pending_question = None
+if "use_pending_question" not in st.session_state:
+    st.session_state.use_pending_question = False
+if "pending_question_button_key" not in st.session_state:
+    st.session_state.pending_question_button_key = 0
+if "is_generating" not in st.session_state:
+    st.session_state.is_generating = False
 
 if not st.session_state.initialized:
     with st.chat_message("assistant"):
@@ -589,7 +870,28 @@ for msg in st.session_state.chat_history:
         else:
             st.markdown(msg["content"])
 
-user_input = st.chat_input("상점명을 입력하거나 질문에 답해주세요...")
+pending_question = st.session_state.get("pending_question")
+missing_info = get_missing_info_fields(st.session_state.info)
+if pending_question and missing_info:
+    with st.container():
+        st.info(
+            "조금만 더 정보를 알려주시면 맞춤 전략을 더 정확히 만들 수 있어요. "
+            "지금 정보만으로도 바로 답변을 받고 싶다면 아래 버튼을 눌러주세요."
+        )
+        if st.button(
+            "이대로 질문",
+            key=f"use_question_{st.session_state.pending_question_button_key}",
+            use_container_width=True,
+            disabled=st.session_state.get("is_generating", False),
+        ):
+            st.session_state.use_pending_question = True
+            st.session_state.auto_followup_question = pending_question
+            st.session_state.pending_question_button_key += 1
+            st.rerun()
+
+auto_followup_question = st.session_state.pop("auto_followup_question", None)
+chat_box_value = st.chat_input("상점명을 입력하거나 질문에 답해주세요...")
+user_input = auto_followup_question or chat_box_value
 
 def add_message(role, content=None, **kwargs):
     message = {"role": role}
@@ -602,26 +904,99 @@ def add_message(role, content=None, **kwargs):
         message["content"] = content if content is not None else ""
     st.session_state.chat_history.append(message)
 
+
+def answer_question_with_current_info(question_text: str):
+    """수집된 정보만으로 사용자의 질문에 답변."""
+    info = st.session_state.get("info", {})
+    missing_fields = get_missing_info_fields(info)
+    prompt = build_direct_question_prompt(info, question_text, missing_fields)
+
+    with st.chat_message("assistant"):
+        placeholder = st.empty()
+        st.session_state.is_generating = True
+        try:
+            answer = stream_gemini(
+                prompt,
+                output_placeholder=placeholder,
+                status_text="질문에 대한 조언을 정리하고 있어요... 💡",
+                progress_text="제공된 정보를 바탕으로 실행 조언을 모으고 있습니다... 🧭",
+                success_text="✅ 답변이 준비되었습니다.",
+                error_status_text="🚨 답변 생성 중 오류가 발생했습니다.",
+            )
+        finally:
+            st.session_state.is_generating = False
+        if answer:
+            placeholder.markdown(answer)
+            add_message("assistant", answer)
+            st.session_state.latest_strategy = {
+                "payload": None,
+                "raw": answer,
+            }
+        else:
+            warning_text = "답변을 생성하지 못했습니다. 질문을 조금 다르게 해보시면 도움이 될 수 있어요."
+            placeholder.warning(warning_text)
+            add_message("assistant", warning_text)
+            st.session_state.latest_strategy = {
+                "payload": None,
+                "raw": "",
+            }
+
+    if get_missing_info_fields(info):
+        st.session_state.pending_question = question_text
+    else:
+        st.session_state.pending_question = None
+    st.session_state.use_pending_question = False
+    st.session_state.shown_followup_suggestion = False
+
 # ─────────────────────────────
 # 8. 대화 로직
 # ─────────────────────────────
 if user_input:
+    use_pending = st.session_state.pop("use_pending_question", False)
+    st.session_state.followup_ui = {}
     add_message("user", user_input)
+
+    if use_pending:
+        answer_question_with_current_info(user_input)
+        st.stop()
 
     # ① 상점명
     if "상점명" not in st.session_state.info:
-        name = user_input.strip()
+        info_updates, detected_question = extract_initial_store_info(user_input)
+        name = info_updates.get("상점명") or user_input.strip()
         st.session_state.info["상점명"] = name
         st.session_state.info["업종"] = classify_hpsn_mct(name)
         st.session_state.info["프랜차이즈여부"] = "프랜차이즈" if is_franchise(name) else "개인점포"
 
-        add_message(
-            "assistant",
-            f"'{name}'은(는) **{st.session_state.info['업종']} 업종**이며 "
-            f"**{st.session_state.info['프랜차이즈여부']}**로 추정됩니다. 🏪\n\n"
-            "개업 시기가 언제인가요? (예: 6개월 전, 2년 전)"
-        )
-        st.rerun()
+        for field in ("점포연령", "고객연령대", "고객행동"):
+            if info_updates.get(field):
+                st.session_state.info[field] = info_updates[field]
+
+        st.session_state.pending_question = detected_question or user_input
+        st.session_state.shown_followup_suggestion = False
+
+        missing_fields = get_missing_info_fields(st.session_state.info)
+        if missing_fields:
+            next_field = missing_fields[0]
+            if next_field == "점포연령":
+                prompt_text = (
+                    f"'{name}'은(는) **{st.session_state.info['업종']} 업종**이며 "
+                    f"**{st.session_state.info['프랜차이즈여부']}**로 추정됩니다. 🏪\n\n"
+                    "개업 시기가 언제인가요? (예: 6개월 전, 2년 전)"
+                )
+            elif next_field == "고객연령대":
+                prompt_text = "좋아요 👍 주요 고객층은 어떤 연령대인가요? (20대 / 30~40대 / 50대 이상)"
+            else:
+                prompt_text = "마지막으로, 고객 유형은 어떤 편인가요? (쉼표로 구분 가능: 재방문, 신규, 직장인, 유동, 거주)"
+
+            add_message("assistant", prompt_text + BUTTON_HINT)
+            st.rerun()
+        else:
+            st.session_state.pending_question_button_key += 1
+            st.session_state.pending_question = st.session_state.pending_question or user_input
+            st.session_state.auto_followup_question = st.session_state.pending_question
+            st.session_state.use_pending_question = True
+            st.rerun()
 
     # ② 개업 시기
     elif "점포연령" not in st.session_state.info:
@@ -634,7 +1009,7 @@ if user_input:
         else:
             st.session_state.info["점포연령"] = "오래된"
 
-        add_message("assistant", "좋아요 👍 주요 고객층은 어떤 연령대인가요? (20대 / 30~40대 / 50대 이상)")
+        add_message("assistant", "좋아요 👍 주요 고객층은 어떤 연령대인가요? (20대 / 30~40대 / 50대 이상)" + BUTTON_HINT)
         st.rerun()
 
     # ③ 고객 연령대
@@ -647,7 +1022,7 @@ if user_input:
         else:
             st.session_state.info["고객연령대"] = "50대 이상 고객 중심"
 
-        add_message("assistant", "마지막으로, 고객 유형은 어떤 편인가요? (쉼표로 구분 가능: 재방문, 신규, 직장인, 유동, 거주)")
+        add_message("assistant", "마지막으로, 고객 유형은 어떤 편인가요? (쉼표로 구분 가능: 재방문, 신규, 직장인, 유동, 거주)" + BUTTON_HINT)
         st.rerun()
 
     # ④ 고객행동 (다중 입력 유연 파싱)
@@ -702,7 +1077,11 @@ if user_input:
         with st.chat_message("assistant"):
             st.markdown("### 📈 생성된 마케팅 전략 결과")
             content_placeholder = st.empty()
-            result = stream_gemini(prompt, output_placeholder=content_placeholder)  # ⬅️ 스트리밍 출력
+            st.session_state.is_generating = True
+            try:
+                result = stream_gemini(prompt, output_placeholder=content_placeholder)  # ⬅️ 스트리밍 출력
+            finally:
+                st.session_state.is_generating = False
             if result:
                 payload = parse_strategy_payload(result)
                 if payload:
@@ -710,6 +1089,11 @@ if user_input:
                     content_placeholder.empty()
                     strategy_container = st.container()
                     render_strategy_payload(payload, strategy_container, prefix=message_id)
+                    st.session_state["latest_strategy"] = {
+                        "payload": payload,
+                        "raw": result,
+                    }
+                    st.session_state.shown_followup_suggestion = False
                     add_message(
                         "assistant",
                         type="strategy",
@@ -724,10 +1108,138 @@ if user_input:
                             f"- {point}" for point in summary_points
                         )
                         content_placeholder.markdown(summary_markdown)
+                        st.session_state["latest_strategy"] = {
+                            "payload": None,
+                            "raw": result,
+                        }
+                        st.session_state.shown_followup_suggestion = False
                         add_message("assistant", summary_markdown)
                     else:
                         fallback_notice = (
                             "구조화된 응답을 표시하지 못했습니다. 다시 시도하거나 프롬프트를 조정해 주세요."
                         )
                         content_placeholder.warning(fallback_notice)
+                        st.session_state["latest_strategy"] = {
+                            "payload": None,
+                            "raw": result,
+                        }
+                        st.session_state.shown_followup_suggestion = False
                         add_message("assistant", fallback_notice)
+    else:
+        latest_strategy_msg = get_latest_strategy_message()
+        stored_strategy = st.session_state.get("latest_strategy", {})
+        strategy_payload = None
+        raw_strategy = ""
+
+        if latest_strategy_msg:
+            strategy_payload = latest_strategy_msg.get("data") or stored_strategy.get("payload")
+            raw_strategy = latest_strategy_msg.get("raw") or stored_strategy.get("raw") or ""
+        elif stored_strategy:
+            strategy_payload = stored_strategy.get("payload")
+            raw_strategy = stored_strategy.get("raw") or ""
+
+        if not (strategy_payload or raw_strategy):
+            pending_q = st.session_state.get("pending_question")
+            info_state = st.session_state.get("info", {})
+            if pending_q and info_state:
+                answer_question_with_current_info(pending_q)
+                st.rerun()
+
+            fallback_notice = (
+                "아직 참고할 전략이 없습니다. 상점 정보를 입력해 맞춤 전략을 생성하거나 "
+                "지금까지의 정보로 '이대로 질문' 버튼을 눌러 바로 조언을 받아보세요."
+            )
+            add_message("assistant", fallback_notice)
+            st.rerun()
+
+        followup_prompt = build_followup_prompt(
+            user_input,
+            st.session_state.get("info", {}),
+            strategy_payload,
+            raw_strategy,
+        )
+
+        with st.chat_message("assistant"):
+            response_placeholder = st.empty()
+            st.session_state.is_generating = True
+            try:
+                followup_answer = stream_gemini(
+                    followup_prompt,
+                    output_placeholder=response_placeholder,
+                    status_text="질문에 대한 답변을 정리하고 있어요... 💡",
+                    progress_text="기존 전략을 바탕으로 가이드를 준비하고 있습니다... 🧭",
+                    success_text="✅ 답변이 준비되었습니다.",
+                    error_status_text="🚨 답변 생성 중 오류가 발생했습니다.",
+                )
+            finally:
+                st.session_state.is_generating = False
+            if followup_answer:
+                parsed_followup = parse_followup_payload(followup_answer)
+                if (
+                    parsed_followup
+                    and (
+                        parsed_followup.get("summary_points")
+                        or parsed_followup.get("detailed_guidance")
+                    )
+                ):
+                    summary_points = (parsed_followup.get("summary_points") or [])[:2]
+                    evidence_mentions = (parsed_followup.get("evidence_mentions") or [])[:3]
+                    detail_text = parsed_followup.get("detailed_guidance", "")
+
+                    guidance_parts = []
+                    if summary_points:
+                        guidance_parts.append("\n".join(point for point in summary_points))
+                    if detail_text:
+                        guidance_parts.append(detail_text)
+                    guidance_text = "\n\n".join(part.strip() for part in guidance_parts if part.strip())
+                    guidance_text = guidance_text or detail_text or followup_answer
+                    suggested_question = (parsed_followup.get("suggested_question") or "").strip()
+
+                    ui_key = st.session_state.get("followup_ui_key", 0) + 1
+                    st.session_state.followup_ui_key = ui_key
+                    st.session_state.followup_ui = {
+                        "guidance": guidance_text,
+                        "evidence": evidence_mentions,
+                        "suggested_question": suggested_question,
+                        "key": ui_key,
+                    }
+
+                    log_sections = ["### 📘 상세 가이드", guidance_text]
+                    if evidence_mentions:
+                        log_sections.append("**근거:**\n" + "\n".join(f"- {item}" for item in evidence_mentions))
+                    log_message = "\n\n".join(section for section in log_sections if section.strip())
+                    if log_message:
+                        add_message("assistant", log_message)
+
+                    response_placeholder.empty()
+                    with st.container():
+                        render_followup_panel(guidance_text, evidence_mentions, suggested_question, ui_key)
+                else:
+                    ui_key = st.session_state.get("followup_ui_key", 0) + 1
+                    st.session_state.followup_ui_key = ui_key
+                    st.session_state.followup_ui = {
+                        "guidance": followup_answer,
+                        "evidence": [],
+                        "suggested_question": "",
+                        "key": ui_key,
+                    }
+
+                    clean_answer = (followup_answer or "").strip()
+                    if clean_answer:
+                        add_message("assistant", "### 📘 상세 가이드\n\n" + clean_answer)
+
+                    response_placeholder.empty()
+                    with st.container():
+                        render_followup_panel(followup_answer, [], "", ui_key)
+            else:
+                warning_text = "답변을 생성하지 못했습니다. 질문을 조금 다르게 해보시면 도움이 될 수 있어요."
+                response_placeholder.warning(warning_text)
+else:
+    active_followup_ui = st.session_state.get("followup_ui", {})
+    if active_followup_ui.get("guidance"):
+        guidance_text = active_followup_ui.get("guidance", "")
+        evidence_items = active_followup_ui.get("evidence", [])
+        suggested_question = active_followup_ui.get("suggested_question", "")
+        ui_key = active_followup_ui.get("key", st.session_state.get("followup_ui_key", 0))
+        with st.chat_message("assistant"):
+            render_followup_panel(guidance_text, evidence_items, suggested_question, ui_key)
