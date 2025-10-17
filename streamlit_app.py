@@ -191,7 +191,8 @@ DIRECT_RESPONSE_GUIDE = (
     "- 불릿 대신 1~2개의 짧은 단락으로 설명하세요.\n"
     "- 중학생이 이해할 수 있는 쉬운 한국어를 사용하세요.\n"
     "- 가능한 경우 숫자나 규칙 같은 근거를 문장 안에 직접 녹여 주세요.\n"
-    "- 실행 아이디어는 구체적인 예시와 함께 제시하세요."
+    "- 실행 아이디어는 구체적인 예시와 함께 제시하세요.\n"
+    "- 마지막에는 `추천 후속 질문: …` 형식으로 사용자가 이어서 물어볼 만한 질문을 한 문장으로 제시하세요."
 )
 
 
@@ -283,6 +284,43 @@ def build_direct_question_prompt(info: dict, question: str, missing_fields=None)
         f"{DIRECT_RESPONSE_GUIDE}"
     )
     return prompt
+
+
+def default_suggested_question(info: dict, question: str) -> str:
+    """질문이나 상점 정보를 바탕으로 기본 후속 질문을 도출."""
+    text = (question or "").lower()
+    if "단골" in text or "재방문" in text:
+        return "단골 고객에게 줄만한 혜택 아이디어도 알려줄 수 있을까요?"
+    if "매출" in text or "판매" in text or "실적" in text:
+        return "매출을 더 끌어올릴 수 있는 추가 프로모션이 있을까요?"
+    if "신규" in text or "새" in text:
+        return "신규 손님을 늘리려면 어떤 홍보 채널이 좋을까요?"
+    if "광고" in text or "홍보" in text or "마케팅" in text:
+        return "광고 예산은 어느 정도로 잡으면 좋을까요?"
+    age = info.get("고객연령대", "")
+    if "30" in age or "40" in age:
+        return "30~40대에게 반응 좋은 콘텐츠 예시를 더 알려줄 수 있을까요?"
+    if "50" in age or "60" in age:
+        return "50대 고객이 좋아할 이벤트나 서비스를 추천해 줄 수 있을까요?"
+    return "SNS 홍보 전략도 알려줄 수 있을까요?"
+
+
+def parse_direct_answer(answer_text: str, info: dict, question: str) -> tuple:
+    """직접 답변에서 상세 가이드와 추천 질문을 분리."""
+    if not answer_text:
+        return "", ""
+
+    guidance = answer_text.strip()
+    suggested_question = ""
+    match = re.search(r"추천\s*후속\s*질문\s*:\s*(.+)$", guidance, flags=re.IGNORECASE | re.MULTILINE)
+    if match:
+        suggested_question = match.group(1).strip()
+        guidance = guidance[: match.start()].strip()
+
+    if not suggested_question:
+        suggested_question = default_suggested_question(info, question)
+
+    return guidance, suggested_question
 
 
 def render_strategy_payload(payload: dict, container, prefix: str = "latest"):
@@ -926,11 +964,30 @@ def answer_question_with_current_info(question_text: str):
         finally:
             st.session_state.is_generating = False
         if answer:
-            placeholder.markdown(answer)
-            add_message("assistant", answer)
+            guidance_text, suggested_question = parse_direct_answer(answer, info, question_text)
+            guidance_text = guidance_text or answer.strip()
+            ui_key = st.session_state.get("followup_ui_key", 0) + 1
+            st.session_state.followup_ui_key = ui_key
+            st.session_state.shown_followup_suggestion = False
+            st.session_state.followup_ui = {
+                "guidance": guidance_text,
+                "evidence": [],
+                "suggested_question": suggested_question,
+                "key": ui_key,
+            }
+
+            placeholder.empty()
+            with st.container():
+                render_followup_panel(guidance_text, [], suggested_question, ui_key)
+
+            log_message = "### 📘 상세 가이드\n\n" + guidance_text
+            if suggested_question:
+                log_message += f"\n\n**가능한 다음 질문:** {suggested_question}"
+            add_message("assistant", log_message)
+
             st.session_state.latest_strategy = {
                 "payload": None,
-                "raw": answer,
+                "raw": guidance_text,
             }
         else:
             warning_text = "답변을 생성하지 못했습니다. 질문을 조금 다르게 해보시면 도움이 될 수 있어요."
@@ -1194,6 +1251,11 @@ if user_input:
                     guidance_text = "\n\n".join(part.strip() for part in guidance_parts if part.strip())
                     guidance_text = guidance_text or detail_text or followup_answer
                     suggested_question = (parsed_followup.get("suggested_question") or "").strip()
+                    if not suggested_question:
+                        suggested_question = default_suggested_question(
+                            st.session_state.get("info", {}),
+                            user_input,
+                        )
 
                     ui_key = st.session_state.get("followup_ui_key", 0) + 1
                     st.session_state.followup_ui_key = ui_key
@@ -1217,20 +1279,27 @@ if user_input:
                 else:
                     ui_key = st.session_state.get("followup_ui_key", 0) + 1
                     st.session_state.followup_ui_key = ui_key
+                    fallback_suggestion = default_suggested_question(
+                        st.session_state.get("info", {}),
+                        user_input,
+                    )
                     st.session_state.followup_ui = {
                         "guidance": followup_answer,
                         "evidence": [],
-                        "suggested_question": "",
+                        "suggested_question": fallback_suggestion,
                         "key": ui_key,
                     }
 
                     clean_answer = (followup_answer or "").strip()
                     if clean_answer:
-                        add_message("assistant", "### 📘 상세 가이드\n\n" + clean_answer)
+                        log_message = "### 📘 상세 가이드\n\n" + clean_answer
+                        if fallback_suggestion:
+                            log_message += f"\n\n**가능한 다음 질문:** {fallback_suggestion}"
+                        add_message("assistant", log_message)
 
                     response_placeholder.empty()
                     with st.container():
-                        render_followup_panel(followup_answer, [], "", ui_key)
+                        render_followup_panel(followup_answer, [], fallback_suggestion, ui_key)
             else:
                 warning_text = "답변을 생성하지 못했습니다. 질문을 조금 다르게 해보시면 도움이 될 수 있어요."
                 response_placeholder.warning(warning_text)
