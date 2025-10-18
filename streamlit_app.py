@@ -86,6 +86,30 @@ FOLLOWUP_RESPONSE_GUIDE = (
 )
 
 
+TOOL_SUGGESTION_GUIDE = (
+    "\n\n응답 형식 지침(중요):\n"
+    "1. 반드시 백틱이나 주석 없이 순수 JSON만 출력하세요.\n"
+    "2. JSON은 아래 스키마를 따르세요.\n"
+    "{\n"
+    '  "tools": [\n'
+    "    {\n"
+    '      "name": "도구 이름",\n'
+    '      "category": "예: SNS 관리 / CRM / 설문",\n'
+    '      "purpose": "Phase 1 목표와 연결된 활용 목적",\n'
+    '      "how_to_use": ["1단계", "2단계", "3단계"],\n'
+    '      "tips": ["활용 팁"],\n'
+    '      "kpi": ["연관 KPI"],\n'
+    '      "cost": "무료/유료 여부 및 가격 범위",\n'
+    '      "korean_support": "한국어 지원 여부"\n'
+    "    }\n"
+    "  ],\n"
+    '  "notes": ["추가 참고사항"]\n'
+    "}\n"
+    "3. how_to_use는 2~3단계로 구체적인 실행 순서를 작성하세요.\n"
+    "4. 도구는 소상공인이 바로 활용할 수 있는 서비스 중심으로 제안하고, 가능하면 무료 또는 저비용 옵션을 우선하세요."
+)
+
+
 def ensure_data_evidence(prompt: str) -> str:
     """프롬프트에 데이터 근거 지침이 없으면 추가."""
     updated = prompt.rstrip()
@@ -182,6 +206,220 @@ def parse_followup_payload(raw_text: str):
     if not isinstance(data, dict):
         return None
     return data
+
+
+def build_phase_followup_question(phase: dict) -> str:
+    """Phase 1 컨텍스트로 추천 후속 질문을 생성."""
+    if not isinstance(phase, dict):
+        return "Phase 1 전략을 실행하면서 추가로 점검해야 할 부분을 알려줄 수 있을까요?"
+
+    focus_channels = phase.get("focus_channels") or []
+    actions = phase.get("actions") or []
+    goal = (phase.get("goal") or "").strip()
+
+    primary_channel = focus_channels[0].strip() if focus_channels else ""
+    primary_action = ""
+    if actions and isinstance(actions[0], dict):
+        primary_action = (actions[0].get("task") or "").strip()
+
+    if primary_channel and primary_action:
+        return f"{primary_channel} 채널에서 '{primary_action}'을 실행할 때 더 준비해야 할 콘텐츠 아이디어가 있을까요?"
+    if primary_channel and goal:
+        return f"{primary_channel} 채널을 활용해 '{goal}' 목표를 달성하려면 추가로 어떤 실행 팁이 필요할까요?"
+    if goal:
+        return f"Phase 1 목표인 '{goal}'을 달성하기 위해 먼저 확인해야 할 체크포인트는 무엇일까요?"
+    if primary_channel:
+        return f"{primary_channel} 채널 운영 시 바로 적용할 수 있는 추가 테스트 아이디어가 있을까요?"
+    return "Phase 1 전략을 실행하면서 추가로 점검해야 할 부분을 알려줄 수 있을까요?"
+
+
+def build_phase_tool_prompt(strategy_payload: dict, phase: dict, store_info: dict | None) -> str:
+    """Phase 1 전략을 기반으로 마케팅 도구 추천 프롬프트를 생성."""
+    store_info = store_info or {}
+    phase = phase if isinstance(phase, dict) else {}
+    info_fields = ["상점명", "업종", "프랜차이즈여부", "점포연령", "고객연령대", "고객행동"]
+    info_lines = [f"- {field}: {store_info[field]}" for field in info_fields if store_info.get(field)]
+    info_block = "\n".join(info_lines) if info_lines else "- 추가 상점 정보 없음"
+
+    objective = (strategy_payload.get("objective") or "").strip() if isinstance(strategy_payload, dict) else ""
+    focus_channels = phase.get("focus_channels") or []
+    focus_block = ", ".join(
+        fc.strip() for fc in focus_channels if isinstance(fc, str) and fc.strip()
+    ) or "미지정"
+
+    actions = phase.get("actions") or []
+    action_lines = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        label = (action.get("task") or "작업 미정").strip()
+        owner = (action.get("owner") or "").strip()
+        support = (action.get("supporting_data") or "").strip()
+        meta_parts = []
+        if owner:
+            meta_parts.append(f"담당 {owner}")
+        if support:
+            meta_parts.append(f"근거 {support}")
+        meta_text = f" ({', '.join(meta_parts)})" if meta_parts else ""
+        action_lines.append(f"- {label}{meta_text}")
+    actions_block = "\n".join(action_lines) if action_lines else "- 등록된 액션 없음"
+
+    metrics = phase.get("metrics") or []
+    metrics_block = (
+        "\n".join(f"- {m}" for m in metrics if isinstance(m, str) and m.strip())
+        if metrics
+        else "- 정의된 KPI 없음"
+    )
+
+    criteria = phase.get("next_phase_criteria") or []
+    criteria_block = (
+        "\n".join(f"- {c}" for c in criteria if isinstance(c, str) and c.strip())
+        if criteria
+        else "- 기준 미정"
+    )
+
+    evidence = phase.get("data_evidence") or []
+    evidence_block = (
+        "\n".join(f"- {e}" for e in evidence if isinstance(e, str) and e.strip())
+        if evidence
+        else "- 추가 근거 없음"
+    )
+
+    prompt_lines = [
+        "당신은 소상공인 마케팅을 지원하는 시니어 컨설턴트입니다.",
+        "아래 Phase 1 전략을 실행할 때 도움이 되는 실무 도구(SaaS, 분석, 콘텐츠 제작, 자동화 등)를 추천하세요.",
+        "도구는 무료 또는 저비용 옵션을 우선 제안하고, 각 도구별로 목적과 2~3단계 실행 가이드를 구체적으로 작성하세요.",
+        "각 도구의 연관 KPI, 비용 범위, 한국어 지원 여부, 활용 시 주의점도 함께 언급하세요.",
+        "",
+        "=== 상점 정보 ===",
+        info_block,
+        "",
+        "=== 전략 Objective ===",
+        f"- {objective}" if objective else "- 제공된 Objective 없음",
+        "",
+        "=== Phase 1 개요 ===",
+        f"- 제목: {phase.get('title', 'Phase 1')}",
+        f"- 목표: {phase.get('goal', '미정')}",
+        f"- 집중 채널: {focus_block}",
+        "",
+        "=== 실행 액션 ===",
+        actions_block,
+        "",
+        "=== 주요 KPI ===",
+        metrics_block,
+        "",
+        "=== 다음 Phase 기준 ===",
+        criteria_block,
+        "",
+        "=== 데이터 근거 ===",
+        evidence_block,
+        TOOL_SUGGESTION_GUIDE,
+    ]
+    return "\n".join(prompt_lines)
+
+
+def parse_tool_suggestions(raw_text: str) -> dict:
+    """도구 추천 JSON을 파싱."""
+    candidate = strip_json_artifacts(raw_text)
+    if not candidate:
+        return {"tools": [], "notes": [], "raw": raw_text.strip()}
+
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        return {"tools": [], "notes": [], "raw": raw_text.strip()}
+
+    tools_data = data.get("tools") if isinstance(data, dict) else []
+    normalized_tools = []
+    if isinstance(tools_data, list):
+        for item in tools_data:
+            if not isinstance(item, dict):
+                continue
+            normalized_tools.append(
+                {
+                    "name": (item.get("name") or "").strip(),
+                    "category": (item.get("category") or "").strip(),
+                    "purpose": (item.get("purpose") or "").strip(),
+                    "how_to_use": [
+                        step.strip()
+                        for step in (item.get("how_to_use") or [])
+                        if isinstance(step, str) and step.strip()
+                    ],
+                    "tips": [
+                        tip.strip()
+                        for tip in (item.get("tips") or [])
+                        if isinstance(tip, str) and tip.strip()
+                    ],
+                    "kpi": [
+                        k.strip()
+                        for k in (item.get("kpi") or [])
+                        if isinstance(k, str) and k.strip()
+                    ],
+                    "cost": (item.get("cost") or "").strip(),
+                    "korean_support": (item.get("korean_support") or "").strip(),
+                }
+            )
+
+    notes_data = data.get("notes") if isinstance(data, dict) else []
+    normalized_notes = [
+        note.strip()
+        for note in notes_data
+        if isinstance(note, str) and note.strip()
+    ]
+
+    return {
+        "tools": normalized_tools,
+        "notes": normalized_notes,
+        "raw": candidate.strip(),
+    }
+
+
+def format_tool_suggestions(parsed: dict) -> str:
+    """도구 추천 파싱 결과를 마크다운으로 변환."""
+    tools = parsed.get("tools") or []
+    notes = parsed.get("notes") or []
+    raw = (parsed.get("raw") or "").strip()
+
+    if not tools and not notes:
+        return raw
+
+    lines = ["### 🛠️ Phase 1 마케팅 도구 추천"]
+    for tool in tools:
+        name = tool.get("name") or "도구 미정"
+        meta_parts = [part for part in (tool.get("category"), tool.get("cost")) if part]
+        meta_text = ", ".join(meta_parts)
+        header = f"- **{name}**"
+        if meta_text:
+            header += f" ({meta_text})"
+        purpose = tool.get("purpose")
+        if purpose:
+            header += f": {purpose}"
+        lines.append(header)
+
+        how_steps = tool.get("how_to_use") or []
+        if how_steps:
+            lines.append("  - 활용 단계:")
+            for step in how_steps:
+                lines.append(f"    - {step}")
+
+        tips = tool.get("tips") or []
+        if tips:
+            lines.append(f"  - 팁: {'; '.join(tips)}")
+
+        kpi = tool.get("kpi") or []
+        if kpi:
+            lines.append(f"  - 연관 KPI: {', '.join(kpi)}")
+
+        korean_support = tool.get("korean_support")
+        if korean_support:
+            lines.append(f"  - 한국어 지원: {korean_support}")
+
+    if notes:
+        lines.append("\n**추가 메모**")
+        for note in notes:
+            lines.append(f"- {note}")
+
+    return "\n".join(lines)
 
 
 INFO_FIELD_ORDER = ["상점명", "점포연령", "고객연령대", "고객행동"]
@@ -397,6 +635,76 @@ def render_strategy_payload(payload: dict, container, prefix: str = "latest"):
         phase1_container.markdown("**Data Evidence:**")
         phase1_container.markdown("\n".join(f"- {e}" for e in evidence))
 
+    suggested_question = build_phase_followup_question(phase1)
+    col_followup, col_tool = phase1_container.columns([3, 2])
+    followup_label = f"❓ {suggested_question}"
+    followup_clicked = col_followup.button(
+        followup_label,
+        key=f"{prefix}_phase1_followup_btn",
+        use_container_width=True,
+        disabled=st.session_state.get("is_generating", False),
+    )
+    tool_button_clicked = col_tool.button(
+        "🛠️ Phase 1 도구 추천 보기",
+        key=f"{prefix}_phase1_tool_btn",
+        use_container_width=True,
+        disabled=st.session_state.get("is_generating", False),
+    )
+
+    existing_tool_info = (st.session_state.get("phase_tool_summaries") or {}).get(prefix)
+    tool_placeholder = None
+    if existing_tool_info:
+        display_previous = (
+            existing_tool_info.get("markdown")
+            or existing_tool_info.get("raw")
+            or ""
+        )
+        if display_previous:
+            tool_placeholder = phase1_container.empty()
+            tool_placeholder.markdown(display_previous)
+
+    if followup_clicked and suggested_question:
+        st.session_state.followup_ui = {}
+        st.session_state.auto_followup_question = suggested_question
+        st.rerun()
+
+    if tool_button_clicked:
+        if tool_placeholder is None:
+            tool_placeholder = phase1_container.empty()
+        prompt = build_phase_tool_prompt(
+            payload,
+            phase1 if isinstance(phase1, dict) else {},
+            st.session_state.get("info", {}),
+        )
+        previous_generating = st.session_state.get("is_generating", False)
+        st.session_state.is_generating = True
+        try:
+            with phase1_container:
+                tool_raw = stream_gemini(
+                    prompt,
+                    output_placeholder=tool_placeholder,
+                    status_text="Phase 1 실행에 맞는 마케팅 도구를 정리하고 있어요... 🛠️",
+                    progress_text="전략과 채널에 맞는 툴과 활용법을 모으는 중입니다...",
+                    success_text="✅ 도구 추천을 정리했습니다.",
+                    error_status_text="🚨 도구 추천 생성 중 오류가 발생했습니다.",
+                )
+        finally:
+            st.session_state.is_generating = previous_generating
+
+        if tool_raw:
+            parsed_tool = parse_tool_suggestions(tool_raw)
+            formatted_tool = format_tool_suggestions(parsed_tool)
+            display_tool_text = formatted_tool or tool_raw
+            tool_placeholder.markdown(display_tool_text)
+            summaries = st.session_state.get("phase_tool_summaries") or {}
+            summaries[prefix] = {
+                "markdown": display_tool_text,
+                "raw": tool_raw,
+            }
+            st.session_state.phase_tool_summaries = summaries
+        else:
+            tool_placeholder.warning("도구 추천을 가져오지 못했습니다. 잠시 후 다시 시도해 주세요.")
+
     # 나머지 Phase는 Expander로 표시
     for idx, phase in enumerate(phases[1:], start=2):
         title = phase.get("title", f"Phase {idx}")
@@ -483,6 +791,644 @@ def render_followup_panel(guidance_text: str, evidence_list, suggested_question:
     if other_clicked:
         st.session_state.followup_ui = {}
         st.rerun()
+
+
+# ─────────────────────────────
+# 1A. 콘텐츠 및 프롬프트 생성 보조 함수
+# ─────────────────────────────
+COPY_LENGTH_HINTS = {
+    "짧게": "문장 2~3개, 80자 내외",
+    "중간": "문단 2개, 120~150자",
+    "길게": "문단 3개 이상, 200자 내외",
+}
+
+DEFAULT_CHANNEL_OPTIONS = ["Instagram", "네이버 블로그", "카카오톡 채널", "오프라인 POP"]
+COPY_TONE_OPTIONS = ["친근한", "트렌디한", "전문적인", "감성적인", "믿음직한"]
+
+VISUAL_STYLE_PRESETS = [
+    "밝고 친근한 평면 일러스트",
+    "사진 같은 리얼리즘",
+    "따뜻한 수채화 톤",
+    "대비 강한 포스터 스타일",
+]
+VISUAL_ASPECT_OPTIONS = ["1:1 정사각형", "3:4 세로", "16:9 가로"]
+
+
+def _strategy_context_lines(strategy_payload, max_lines: int = 8) -> list[str]:
+    """마케팅 전략 요약을 기반으로 에셋 생성 시 참고할 핵심 포인트 추출."""
+    if not strategy_payload:
+        return []
+
+    if isinstance(strategy_payload, str):
+        raw_lines = [
+            f"- {line.strip()}"
+            for line in strategy_payload.splitlines()
+            if line.strip()
+        ]
+        return raw_lines[:max_lines]
+
+    if not isinstance(strategy_payload, dict):
+        return []
+
+    lines = []
+    objective = strategy_payload.get("objective")
+    if objective:
+        lines.append(f"- Objective: {objective}")
+
+    channel_summary = strategy_payload.get("channel_summary") or []
+    for item in channel_summary[:3]:
+        channel = item.get("channel", "채널 미지정")
+        reason = item.get("reason", "")
+        evidence = item.get("data_evidence", "")
+        snippet = f"- {channel}: {reason}"
+        if evidence:
+            snippet += f" (근거: {evidence})"
+        lines.append(snippet)
+
+    phases = strategy_payload.get("phases") or []
+    if phases:
+        first_phase = phases[0]
+        title = first_phase.get("title", "Phase 1")
+        goal = first_phase.get("goal")
+        if goal:
+            lines.append(f"- {title} 목표: {goal}")
+        actions = first_phase.get("actions") or []
+        for action in actions[:3]:
+            task = action.get("task")
+            owner = action.get("owner")
+            if task:
+                if owner:
+                    lines.append(f"- 실행: {task} (담당: {owner})")
+                else:
+                    lines.append(f"- 실행: {task}")
+
+    return lines[:max_lines]
+
+
+def _available_channels(strategy_payload) -> list[str]:
+    """전략 데이터에서 추천 채널 목록을 뽑아 유니크하게 반환."""
+    channels = []
+    if isinstance(strategy_payload, dict):
+        channel_summary = strategy_payload.get("channel_summary") or []
+        for item in channel_summary:
+            ch = item.get("channel")
+            if ch:
+                channels.append(ch)
+        phases = strategy_payload.get("phases") or []
+        for phase in phases:
+            focus_channels = phase.get("focus_channels") or []
+            for ch in focus_channels:
+                channels.append(ch)
+    unique_channels = []
+    for ch in channels:
+        if ch and ch not in unique_channels:
+            unique_channels.append(ch)
+    if not unique_channels:
+        unique_channels = DEFAULT_CHANNEL_OPTIONS
+    return unique_channels
+
+
+def build_copy_generation_prompt(
+    info: dict,
+    request: dict,
+    strategy_payload: dict | str | None,
+) -> str:
+    """카피 초안 생성을 위한 프롬프트."""
+    store_name = info.get("상점명", "상점")
+    industry = info.get("업종", "소상공인")
+    audience = info.get("고객연령대", "")
+    behavior = info.get("고객행동", "")
+
+    tone = request.get("tone", "친근한")
+    channel = request.get("channel", "SNS")
+    length_label = request.get("length", "중간")
+    length_hint = COPY_LENGTH_HINTS.get(length_label, "문단 2개, 120~150자")
+    offer = request.get("offer") or "기본 서비스와 강점을 강조"
+    extras = request.get("extras", "")
+
+    strategy_lines = _strategy_context_lines(strategy_payload)
+    strategy_block = "\n".join(strategy_lines) if strategy_lines else "• 전략 요약 없음"
+
+    prompt = (
+        "당신은 한국 중소상공인의 카피라이터입니다.\n"
+        "아래 상점 정보와 전략 요약을 참고해 마케팅 카피 초안을 작성하세요.\n"
+        "카피는 바로 사용할 수 있게 완성도 높은 문장으로 제공하고, 문단마다 이모지는 넣지 마세요.\n"
+        "핵심 CTA 문장을 포함하고, 숫자나 구체적인 혜택이 있다면 자연스럽게 녹여주세요.\n\n"
+        f"=== 상점 정보 ===\n"
+        f"- 상호: {store_name}\n"
+        f"- 업종: {industry}\n"
+        f"- 주요 고객: {audience or '미상'} / {behavior or '특이 행동 미상'}\n\n"
+        f"=== 콘텐츠 요구사항 ===\n"
+        f"- 채널: {channel}\n"
+        f"- 톤앤매너: {tone}\n"
+        f"- 분량: {length_label} ({length_hint})\n"
+        f"- 강조 포인트: {offer}\n"
+        f"- 추가 요청: {extras or '없음'}\n\n"
+        f"=== 전략 요약 ===\n"
+        f"{strategy_block}\n\n"
+        "응답 형식 지침:\n"
+        "1. 아래와 같은 마크다운 섹션을 그대로 사용합니다.\n"
+        "### 헤드라인\n"
+        "- 한 줄 헤드라인\n\n"
+        "### 본문\n"
+        "- 문단 1\n"
+        "- 문단 2 (필요 시)\n\n"
+        "### CTA\n"
+        "- 행동을 유도하는 한 문장\n\n"
+        "### 채널 참고 메모\n"
+        "- 채널 운영 팁 또는 게시 시 주의사항 1~2개\n"
+    )
+    return prompt
+
+
+def build_visual_brief_prompt(
+    info: dict,
+    request: dict,
+    strategy_payload: dict | str | None,
+) -> str:
+    """이미지/일러스트 콘셉트 브리프 생성을 위한 프롬프트."""
+    store_name = info.get("상점명", "상점")
+    industry = info.get("업종", "소상공인")
+
+    focus = request.get("focus", "대표 메뉴와 매장 분위기")
+    style = request.get("style") or VISUAL_STYLE_PRESETS[0]
+    aspect = request.get("aspect", "1:1 정사각형")
+    extras = request.get("extras", "")
+
+    strategy_lines = _strategy_context_lines(strategy_payload)
+    strategy_block = "\n".join(strategy_lines) if strategy_lines else "• 전략 요약 없음"
+
+    prompt = (
+        "당신은 마케팅 아트 디렉터입니다.\n"
+        "아래 정보를 참고해 AI 이미지 생성 도구에 전달할 시각 콘셉트 브리프를 작성하세요.\n"
+        "브리프는 장면 구성, 핵심 오브젝트, 색감, 텍스트 오버레이 가이드 등을 포함해야 합니다.\n\n"
+        f"=== 상점 정보 ===\n"
+        f"- 상호: {store_name}\n"
+        f"- 업종: {industry}\n\n"
+        f"=== 요청 사항 ===\n"
+        f"- 강조 포커스: {focus}\n"
+        f"- 희망 스타일: {style}\n"
+        f"- 이미지 비율: {aspect}\n"
+        f"- 추가 요청: {extras or '없음'}\n\n"
+        f"=== 전략 요약 ===\n"
+        f"{strategy_block}\n\n"
+        "응답 형식 지침:\n"
+        "1. 아래 마크다운 섹션 제목을 그대로 사용합니다.\n"
+        "### 콘셉트 요약\n"
+        "- 장면 한 줄 요약\n\n"
+        "### 장면 구성\n"
+        "- 전경 요소\n"
+        "- 중경 요소\n"
+        "- 배경 요소\n\n"
+        "### 시각 톤 & 스타일\n"
+        "- 컬러 팔레트 2~3개\n"
+        "- 조명/질감 설명\n\n"
+        "### 텍스트 오버레이\n"
+        "- 포함할 문구 1~2개 (있다면)\n\n"
+        "### 생성 팁\n"
+        "- 이미지 생성 시 주의하거나 강조할 사항 2개 내외\n"
+    )
+    return prompt
+
+
+PROMPT_EXAMPLE_GUIDE = (
+    "\n\n응답 형식 지침(중요):\n"
+    "{\n"
+    '  "prompts": [\n'
+    "    {\n"
+    '      "title": "상황 제목",\n'
+    '      "prompt": "AI 도구에 붙여넣을 프롬프트",\n'
+    '      "when": "이 프롬프트가 유용한 상황 설명"\n'
+    "    }\n"
+    "  ],\n"
+    '  "tips": ["활용 팁 1", "활용 팁 2"]\n'
+    "}\n"
+    "프롬프트 문장은 한 줄로 작성하고, 한국어 사용을 기본으로 하되 필요 시 영어 키워드도 병기하세요."
+)
+
+
+def build_prompt_example_prompt(
+    asset_type: str,
+    request: dict,
+    generated_asset: str,
+    info: dict,
+) -> str:
+    """에셋 결과를 바탕으로 후속 프롬프트 예시를 생성하기 위한 프롬프트."""
+    asset_label = "카피" if asset_type == "copy" else "이미지"
+    context_lines = []
+    if request.get("channel"):
+        context_lines.append(f"- 채널: {request['channel']}")
+    if request.get("tone"):
+        context_lines.append(f"- 톤: {request['tone']}")
+    if request.get("length"):
+        context_lines.append(f"- 분량: {request['length']}")
+    if request.get("style"):
+        context_lines.append(f"- 스타일: {request['style']}")
+    if request.get("focus"):
+        context_lines.append(f"- 강조 포커스: {request['focus']}")
+
+    context_block = "\n".join(context_lines) if context_lines else "- 추가 컨텍스트 없음"
+    store_name = info.get("상점명", "상점")
+
+    prompt = (
+        "당신은 마케팅 전문가입니다.\n"
+        f"이미 생성된 {asset_label} 초안을 기반으로, 사용자가 다음 반복에서 활용할 프롬프트 예시를 제안하세요.\n"
+        "프롬프트는 실무자가 AI 도구에 그대로 붙여넣을 수 있을 정도로 구체적이어야 합니다.\n"
+        "각 프롬프트는 톤이나 목적이 서로 다르게 구성해 선택지를 제공합니다.\n\n"
+        f"=== 상점명 ===\n- {store_name}\n\n"
+        f"=== 컨텍스트 ===\n{context_block}\n\n"
+        f"=== 현재 초안 ===\n{generated_asset.strip()}\n"
+        f"{PROMPT_EXAMPLE_GUIDE}"
+    )
+    return prompt
+
+
+def parse_prompt_examples(raw_text: str) -> dict:
+    """프롬프트 예시 JSON을 파싱하고, 실패 시 원문을 함께 반환."""
+    candidate = strip_json_artifacts(raw_text)
+    if not candidate:
+        return {"prompts": [], "tips": [], "raw": raw_text.strip()}
+
+    try:
+        data = json.loads(candidate)
+    except json.JSONDecodeError:
+        return {"prompts": [], "tips": [], "raw": raw_text.strip()}
+
+    prompts = data.get("prompts") if isinstance(data, dict) else None
+    tips = data.get("tips") if isinstance(data, dict) else None
+
+    if not isinstance(prompts, list):
+        prompts = []
+    normalized_prompts = []
+    for item in prompts:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title") or item.get("name") or ""
+        prompt_text = item.get("prompt") or item.get("content") or ""
+        when = item.get("when") or item.get("best_for") or ""
+        if prompt_text:
+            normalized_prompts.append(
+                {
+                    "title": title.strip() if isinstance(title, str) else "",
+                    "prompt": prompt_text.strip() if isinstance(prompt_text, str) else "",
+                    "when": when.strip() if isinstance(when, str) else "",
+                }
+            )
+
+    if not isinstance(tips, list):
+        tips = []
+    normalized_tips = [
+        tip.strip() for tip in tips if isinstance(tip, str) and tip.strip()
+    ]
+
+    return {
+        "prompts": normalized_prompts,
+        "tips": normalized_tips,
+        "raw": candidate.strip(),
+    }
+
+
+def render_copy_workspace(info: dict, strategy_payload, raw_strategy: str | None):
+    """카피 생성 및 프롬프트 추천 UI."""
+    st.markdown("#### 📝 마케팅 카피")
+    st.caption("채널별 카피 초안을 먼저 생성하고, 이어서 변형에 쓸 프롬프트를 추천받으세요.")
+
+    available_channels = _available_channels(strategy_payload if strategy_payload else raw_strategy)
+    prev_context = st.session_state.copy_context or {}
+
+    default_channel = prev_context.get("channel", available_channels[0] if available_channels else "SNS")
+    channel_index = available_channels.index(default_channel) if default_channel in available_channels else 0
+    channel = st.selectbox(
+        "채널 선택",
+        available_channels,
+        index=channel_index if available_channels else 0,
+        key="copy_channel_select",
+    )
+
+    tone_default = prev_context.get("tone", COPY_TONE_OPTIONS[0])
+    tone_index = COPY_TONE_OPTIONS.index(tone_default) if tone_default in COPY_TONE_OPTIONS else 0
+    tone = st.selectbox("톤앤매너", COPY_TONE_OPTIONS, index=tone_index, key="copy_tone_select")
+
+    length_options = list(COPY_LENGTH_HINTS.keys())
+    length_default = prev_context.get("length", "중간")
+    length_index = length_options.index(length_default) if length_default in length_options else 1
+    length = st.radio("분량", length_options, index=length_index, horizontal=True, key="copy_length_radio")
+
+    offer = st.text_input(
+        "강조할 혜택/프로모션",
+        value=prev_context.get("offer", ""),
+        placeholder="예: 11월 한정 신메뉴 10% 할인, 오전 11시까지 아메리카노 1+1",
+        key="copy_offer_input",
+    )
+    extras = st.text_area(
+        "추가 요청 (선택)",
+        value=prev_context.get("extras", ""),
+        placeholder="예: 첫 문장은 질문으로 시작, 해시태그 3개 포함, 숫자 데이터 강조",
+        height=80,
+        key="copy_extra_input",
+    )
+
+    col_generate, col_clear = st.columns([3, 1])
+    with col_generate:
+        disable_generate = (
+            st.session_state.copy_generation_in_progress
+            or st.session_state.visual_generation_in_progress
+            or st.session_state.get("is_generating", False)
+        )
+        if st.button(
+            "AI 카피 초안 생성",
+            key="copy_generate_button",
+            use_container_width=True,
+            disabled=disable_generate,
+        ):
+            request_payload = {
+                "channel": channel,
+                "tone": tone,
+                "length": length,
+                "offer": offer.strip(),
+                "extras": extras.strip(),
+            }
+            st.session_state.copy_context = request_payload
+            st.session_state.copy_request = request_payload
+            st.session_state.copy_generation_in_progress = True
+            st.session_state.copy_draft = ""
+            st.session_state.copy_prompt_examples = []
+            st.session_state.copy_prompt_tips = []
+            st.session_state.copy_prompts_raw = ""
+            st.rerun()
+
+    with col_clear:
+        if st.button(
+            "초안 초기화",
+            key="copy_clear_button",
+            use_container_width=True,
+            disabled=st.session_state.copy_generation_in_progress,
+        ):
+            st.session_state.copy_draft = ""
+            st.session_state.copy_prompt_examples = []
+            st.session_state.copy_prompt_tips = []
+            st.session_state.copy_prompts_raw = ""
+            st.rerun()
+
+    if st.session_state.copy_generation_in_progress and st.session_state.copy_request:
+        generation_container = st.container()
+        with generation_container:
+            placeholder = st.empty()
+            prompt = build_copy_generation_prompt(
+                info,
+                st.session_state.copy_request,
+                strategy_payload or raw_strategy,
+            )
+            copy_result = stream_gemini(
+                prompt,
+                output_placeholder=placeholder,
+                status_text="카피 초안을 정리하고 있어요... ✍️",
+                progress_text="전략과 요청을 반영해 문구를 다듬는 중입니다...",
+                success_text="✅ 카피 초안이 준비되었습니다.",
+                error_status_text="🚨 카피 생성 중 오류가 발생했습니다.",
+            )
+
+        st.session_state.copy_generation_in_progress = False
+        st.session_state.copy_request = None
+
+        if copy_result:
+            st.session_state.copy_draft = copy_result.strip()
+            prompt_container = st.container()
+            with prompt_container:
+                prompt_placeholder = st.empty()
+                prompt_request = build_prompt_example_prompt(
+                    "copy",
+                    st.session_state.copy_context,
+                    st.session_state.copy_draft,
+                    info,
+                )
+                prompt_result = stream_gemini(
+                    prompt_request,
+                    output_placeholder=prompt_placeholder,
+                    status_text="추천 프롬프트를 정리하고 있어요... 💡",
+                    progress_text="다음 반복에 쓸 프롬프트 변형을 모으는 중입니다...",
+                    success_text="✅ 프롬프트 제안이 준비되었습니다.",
+                    error_status_text="🚨 프롬프트 추천 생성 중 오류가 발생했습니다.",
+                )
+            if prompt_result:
+                parsed = parse_prompt_examples(prompt_result)
+                st.session_state.copy_prompt_examples = parsed.get("prompts", [])
+                st.session_state.copy_prompt_tips = parsed.get("tips", [])
+                st.session_state.copy_prompts_raw = parsed.get("raw", "")
+            else:
+                st.session_state.copy_prompt_examples = []
+                st.session_state.copy_prompt_tips = []
+                st.session_state.copy_prompts_raw = ""
+        else:
+            st.session_state.copy_draft = ""
+            st.session_state.copy_prompt_examples = []
+            st.session_state.copy_prompt_tips = []
+            st.session_state.copy_prompts_raw = ""
+
+        st.rerun()
+
+    if st.session_state.copy_draft:
+        st.markdown("##### 생성된 카피")
+        st.markdown(st.session_state.copy_draft)
+
+        with st.expander("🔧 프롬프트 추천", expanded=False):
+            if st.session_state.copy_prompt_examples:
+                for idx, item in enumerate(st.session_state.copy_prompt_examples, start=1):
+                    title = item.get("title") or f"프롬프트 {idx}"
+                    prompt_text = item.get("prompt", "")
+                    when_text = item.get("when", "")
+                    st.markdown(f"**{title}**")
+                    if prompt_text:
+                        st.code(prompt_text, language="text")
+                    if when_text:
+                        st.caption(when_text)
+            elif st.session_state.copy_prompts_raw:
+                st.markdown(st.session_state.copy_prompts_raw)
+
+            if st.session_state.copy_prompt_tips:
+                st.markdown("**활용 팁**")
+                tips_markdown = "\n".join(f"- {tip}" for tip in st.session_state.copy_prompt_tips)
+                st.markdown(tips_markdown)
+    else:
+        st.info("생성 버튼을 눌러 채널에 맞는 카피 초안을 받아보세요.")
+
+
+def render_visual_workspace(info: dict, strategy_payload, raw_strategy: str | None):
+    """비주얼 브리프 생성 및 프롬프트 추천 UI."""
+    st.markdown("#### 🎨 이미지/일러스트 브리프")
+    st.caption("AI가 먼저 콘셉트 브리프를 제안하고, 이어서 이미지 생성용 프롬프트를 추천합니다.")
+
+    prev_context = st.session_state.visual_context or {}
+
+    focus = st.text_input(
+        "강조 포커스",
+        value=prev_context.get("focus", "대표 상품과 매장 분위기"),
+        placeholder="예: 겨울 한정 메뉴, 배달 서비스, 테이크아웃 존",
+        key="visual_focus_input",
+    )
+
+    style_default = prev_context.get("style", VISUAL_STYLE_PRESETS[0])
+    style_index = VISUAL_STYLE_PRESETS.index(style_default) if style_default in VISUAL_STYLE_PRESETS else 0
+    style = st.selectbox(
+        "희망 스타일",
+        VISUAL_STYLE_PRESETS,
+        index=style_index,
+        key="visual_style_select",
+    )
+
+    aspect_default = prev_context.get("aspect", VISUAL_ASPECT_OPTIONS[0])
+    aspect_index = VISUAL_ASPECT_OPTIONS.index(aspect_default) if aspect_default in VISUAL_ASPECT_OPTIONS else 0
+    aspect = st.selectbox(
+        "이미지 비율",
+        VISUAL_ASPECT_OPTIONS,
+        index=aspect_index,
+        key="visual_aspect_select",
+    )
+
+    extras = st.text_area(
+        "추가 요청 (선택)",
+        value=prev_context.get("extras", ""),
+        placeholder="예: 따뜻한 조명감, 매장 외부 전경 포함, 텍스트는 한국어만 사용",
+        height=80,
+        key="visual_extra_input",
+    )
+
+    col_generate, col_clear = st.columns([3, 1])
+    with col_generate:
+        disable_generate = (
+            st.session_state.visual_generation_in_progress
+            or st.session_state.copy_generation_in_progress
+            or st.session_state.get("is_generating", False)
+        )
+        if st.button(
+            "AI 브리프 생성",
+            key="visual_generate_button",
+            use_container_width=True,
+            disabled=disable_generate,
+        ):
+            request_payload = {
+                "focus": focus.strip(),
+                "style": style,
+                "aspect": aspect,
+                "extras": extras.strip(),
+            }
+            st.session_state.visual_context = request_payload
+            st.session_state.visual_request = request_payload
+            st.session_state.visual_generation_in_progress = True
+            st.session_state.visual_brief = ""
+            st.session_state.visual_prompt_examples = []
+            st.session_state.visual_prompt_tips = []
+            st.session_state.visual_prompts_raw = ""
+            st.rerun()
+
+    with col_clear:
+        if st.button(
+            "브리프 초기화",
+            key="visual_clear_button",
+            use_container_width=True,
+            disabled=st.session_state.visual_generation_in_progress,
+        ):
+            st.session_state.visual_brief = ""
+            st.session_state.visual_prompt_examples = []
+            st.session_state.visual_prompt_tips = []
+            st.session_state.visual_prompts_raw = ""
+            st.rerun()
+
+    if st.session_state.visual_generation_in_progress and st.session_state.visual_request:
+        generation_container = st.container()
+        with generation_container:
+            placeholder = st.empty()
+            prompt = build_visual_brief_prompt(
+                info,
+                st.session_state.visual_request,
+                strategy_payload or raw_strategy,
+            )
+            brief_result = stream_gemini(
+                prompt,
+                output_placeholder=placeholder,
+                status_text="이미지 콘셉트를 정리하고 있어요... 🎨",
+                progress_text="요청한 스타일을 반영해 장면을 구성하는 중입니다...",
+                success_text="✅ 브리프가 준비되었습니다.",
+                error_status_text="🚨 브리프 생성 중 오류가 발생했습니다.",
+            )
+
+        st.session_state.visual_generation_in_progress = False
+        st.session_state.visual_request = None
+
+        if brief_result:
+            st.session_state.visual_brief = brief_result.strip()
+            prompt_container = st.container()
+            with prompt_container:
+                prompt_placeholder = st.empty()
+                prompt_request = build_prompt_example_prompt(
+                    "visual",
+                    st.session_state.visual_context,
+                    st.session_state.visual_brief,
+                    info,
+                )
+                prompt_result = stream_gemini(
+                    prompt_request,
+                    output_placeholder=prompt_placeholder,
+                    status_text="이미지 프롬프트를 정리하고 있어요... 💡",
+                    progress_text="다음 변형에 쓸 프롬프트 옵션을 모으는 중입니다...",
+                    success_text="✅ 프롬프트 제안이 준비되었습니다.",
+                    error_status_text="🚨 프롬프트 추천 생성 중 오류가 발생했습니다.",
+                )
+
+            if prompt_result:
+                parsed = parse_prompt_examples(prompt_result)
+                st.session_state.visual_prompt_examples = parsed.get("prompts", [])
+                st.session_state.visual_prompt_tips = parsed.get("tips", [])
+                st.session_state.visual_prompts_raw = parsed.get("raw", "")
+            else:
+                st.session_state.visual_prompt_examples = []
+                st.session_state.visual_prompt_tips = []
+                st.session_state.visual_prompts_raw = ""
+        else:
+            st.session_state.visual_brief = ""
+            st.session_state.visual_prompt_examples = []
+            st.session_state.visual_prompt_tips = []
+            st.session_state.visual_prompts_raw = ""
+
+        st.rerun()
+
+    if st.session_state.visual_brief:
+        st.markdown("##### 생성된 브리프")
+        st.markdown(st.session_state.visual_brief)
+
+        with st.expander("🔧 프롬프트 추천", expanded=False):
+            if st.session_state.visual_prompt_examples:
+                for idx, item in enumerate(st.session_state.visual_prompt_examples, start=1):
+                    title = item.get("title") or f"프롬프트 {idx}"
+                    prompt_text = item.get("prompt", "")
+                    when_text = item.get("when", "")
+                    st.markdown(f"**{title}**")
+                    if prompt_text:
+                        st.code(prompt_text, language="text")
+                    if when_text:
+                        st.caption(when_text)
+            elif st.session_state.visual_prompts_raw:
+                st.markdown(st.session_state.visual_prompts_raw)
+
+            if st.session_state.visual_prompt_tips:
+                st.markdown("**활용 팁**")
+                tips_markdown = "\n".join(f"- {tip}" for tip in st.session_state.visual_prompt_tips)
+                st.markdown(tips_markdown)
+    else:
+        st.info("생성 버튼을 눌러 이미지 제작에 활용할 브리프를 받아보세요.")
+
+
+def render_asset_workshop(strategy_payload, raw_strategy: str | None, info: dict):
+    """콘텐츠/이미지 생성 워크스페이스를 렌더링."""
+    st.markdown("### ✨ 콘텐츠 & 이미지 생성 워크스페이스")
+    st.caption("AI가 먼저 초안을 제시하고, 이어서 활용할 프롬프트 예시를 제공합니다.")
+
+    copy_tab, visual_tab = st.tabs(["카피 생성", "이미지 브리프"])
+    with copy_tab:
+        render_copy_workspace(info, strategy_payload, raw_strategy)
+    with visual_tab:
+        render_visual_workspace(info, strategy_payload, raw_strategy)
+
 
 # ─────────────────────────────
 # 2. Persona 데이터 로드
@@ -873,6 +1819,8 @@ if "initialized" not in st.session_state:
     st.session_state.initialized = False
 if "latest_strategy" not in st.session_state:
     st.session_state.latest_strategy = {}
+if "phase_tool_summaries" not in st.session_state:
+    st.session_state.phase_tool_summaries = {}
 if "followup_ui" not in st.session_state:
     st.session_state.followup_ui = {}
 if "followup_ui_key" not in st.session_state:
@@ -889,6 +1837,34 @@ if "pending_question_button_key" not in st.session_state:
     st.session_state.pending_question_button_key = 0
 if "is_generating" not in st.session_state:
     st.session_state.is_generating = False
+if "copy_request" not in st.session_state:
+    st.session_state.copy_request = None
+if "copy_generation_in_progress" not in st.session_state:
+    st.session_state.copy_generation_in_progress = False
+if "copy_draft" not in st.session_state:
+    st.session_state.copy_draft = ""
+if "copy_context" not in st.session_state:
+    st.session_state.copy_context = {}
+if "copy_prompt_examples" not in st.session_state:
+    st.session_state.copy_prompt_examples = []
+if "copy_prompt_tips" not in st.session_state:
+    st.session_state.copy_prompt_tips = []
+if "copy_prompts_raw" not in st.session_state:
+    st.session_state.copy_prompts_raw = ""
+if "visual_request" not in st.session_state:
+    st.session_state.visual_request = None
+if "visual_generation_in_progress" not in st.session_state:
+    st.session_state.visual_generation_in_progress = False
+if "visual_brief" not in st.session_state:
+    st.session_state.visual_brief = ""
+if "visual_context" not in st.session_state:
+    st.session_state.visual_context = {}
+if "visual_prompt_examples" not in st.session_state:
+    st.session_state.visual_prompt_examples = []
+if "visual_prompt_tips" not in st.session_state:
+    st.session_state.visual_prompt_tips = []
+if "visual_prompts_raw" not in st.session_state:
+    st.session_state.visual_prompts_raw = ""
 
 if not st.session_state.initialized:
     with st.chat_message("assistant"):
@@ -926,6 +1902,15 @@ if pending_question and missing_info:
             st.session_state.auto_followup_question = pending_question
             st.session_state.pending_question_button_key += 1
             st.rerun()
+
+latest_strategy_state = st.session_state.get("latest_strategy", {})
+strategy_payload_for_assets = latest_strategy_state.get("payload")
+raw_strategy_for_assets = latest_strategy_state.get("raw")
+info_state_for_assets = st.session_state.get("info", {})
+
+if not missing_info and (strategy_payload_for_assets or raw_strategy_for_assets):
+    with st.container():
+        render_asset_workshop(strategy_payload_for_assets, raw_strategy_for_assets, info_state_for_assets)
 
 auto_followup_question = st.session_state.pop("auto_followup_question", None)
 chat_box_value = st.chat_input("상점명을 입력하거나 질문에 답해주세요...")
