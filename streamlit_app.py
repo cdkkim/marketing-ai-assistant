@@ -1,4 +1,7 @@
+# -*- coding: utf-8 -*-
 import os
+import io
+import csv
 import re
 import json
 import logging
@@ -24,6 +27,7 @@ else:
     st.warning("⚠️ GOOGLE_API_KEY가 설정되어 있지 않습니다. Streamlit secrets에 추가하세요.")
 
 DEFAULT_MODEL = "gemini-2.5-flash"
+
 DATA_EVIDENCE_GUIDE = (
     "\n\n추가 지침:\n"
     "- 각 제안에는 데이터 근거(표/지표/규칙 등)를 함께 표기하세요.\n"
@@ -69,6 +73,7 @@ STRUCTURED_RESPONSE_GUIDE = (
     "4. 모든 reason, supporting_data, data_evidence에는 정량 수치나 규칙적 근거를 명시하세요."
 )
 
+
 FOLLOWUP_RESPONSE_GUIDE = (
     "\n\n응답 형식 지침(중요):\n"
     "1. 반드시 백틱이나 주석 없이 순수 JSON만 출력하세요.\n"
@@ -85,7 +90,6 @@ FOLLOWUP_RESPONSE_GUIDE = (
     "6. suggested_question은 사용자가 바로 물어볼 수 있는 짧은 후속 질문 1개만 제안하세요."
 )
 
-
 def ensure_data_evidence(prompt: str) -> str:
     """프롬프트에 데이터 근거 지침이 없으면 추가."""
     updated = prompt.rstrip()
@@ -94,7 +98,6 @@ def ensure_data_evidence(prompt: str) -> str:
     if '"phase_titles"' not in updated and "응답 형식 지침(중요)" not in updated:
         updated += STRUCTURED_RESPONSE_GUIDE
     return updated
-
 
 def extract_executive_summary(markdown_text: str, max_points: int = 4):
     """생성된 전략 본문에서 요약 섹션의 핵심 불릿을 추출."""
@@ -150,14 +153,12 @@ def extract_executive_summary(markdown_text: str, max_points: int = 4):
 
     return summary_lines
 
-
 def strip_json_artifacts(text: str) -> str:
     """스트리밍 중 섞일 수 있는 불필요한 문자를 제거하고 순수 JSON 문자열만 남긴다."""
     cleaned = text.strip().replace("▌", "")
     fence_pattern = re.compile(r"^```(?:json)?\s*|\s*```$")
     cleaned = fence_pattern.sub("", cleaned)
     return cleaned.strip()
-
 
 def parse_strategy_payload(raw_text: str):
     """JSON 응답을 안전하게 파싱. 실패 시 None."""
@@ -168,7 +169,6 @@ def parse_strategy_payload(raw_text: str):
         return json.loads(candidate)
     except json.JSONDecodeError:
         return None
-
 
 def parse_followup_payload(raw_text: str):
     """후속 질의 응답용 JSON을 파싱."""
@@ -183,7 +183,6 @@ def parse_followup_payload(raw_text: str):
         return None
     return data
 
-
 INFO_FIELD_ORDER = ["상점명", "점포연령", "고객연령대", "고객행동"]
 BUTTON_HINT = "\n\n필요한 정보가 아니어도 아래 '이대로 질문' 버튼을 누르면 지금 정보로 바로 답변을 드릴게요."
 DIRECT_RESPONSE_GUIDE = (
@@ -195,7 +194,6 @@ DIRECT_RESPONSE_GUIDE = (
     "- 마지막에는 `추천 후속 질문: …` 형식으로 사용자가 이어서 물어볼 만한 질문을 한 문장으로 제시하세요."
 )
 
-
 def get_missing_info_fields(info: dict) -> list:
     """필수 정보 중 아직 수집되지 않은 항목을 반환."""
     missing = []
@@ -205,7 +203,6 @@ def get_missing_info_fields(info: dict) -> list:
             missing.append(field)
     return missing
 
-
 def get_latest_strategy_message():
     """세션 기록에서 가장 최신 전략 메시지를 반환."""
     history = st.session_state.get("chat_history", [])
@@ -213,7 +210,6 @@ def get_latest_strategy_message():
         if item.get("type") == "strategy":
             return item
     return None
-
 
 def build_followup_prompt(question: str, info: dict, strategy_payload: dict, raw_strategy: str) -> str:
     """이전 전략을 문맥으로 후속 질문에 답하기 위한 프롬프트 생성."""
@@ -252,7 +248,6 @@ def build_followup_prompt(question: str, info: dict, strategy_payload: dict, raw
     )
     return prompt
 
-
 def build_direct_question_prompt(info: dict, question: str, missing_fields=None) -> str:
     """수집된 정보만으로 직접 질문에 답하는 프롬프트 생성."""
     missing_fields = missing_fields or []
@@ -285,7 +280,6 @@ def build_direct_question_prompt(info: dict, question: str, missing_fields=None)
     )
     return prompt
 
-
 def default_suggested_question(info: dict, question: str) -> str:
     """질문이나 상점 정보를 바탕으로 기본 후속 질문을 도출."""
     text = (question or "").lower()
@@ -304,7 +298,6 @@ def default_suggested_question(info: dict, question: str) -> str:
         return "50대 고객이 좋아할 이벤트나 서비스를 추천해 줄 수 있을까요?"
     return "SNS 홍보 전략도 알려줄 수 있을까요?"
 
-
 def parse_direct_answer(answer_text: str, info: dict, question: str) -> tuple:
     """직접 답변에서 상세 가이드와 추천 질문을 분리."""
     if not answer_text:
@@ -321,7 +314,6 @@ def parse_direct_answer(answer_text: str, info: dict, question: str) -> tuple:
         suggested_question = default_suggested_question(info, question)
 
     return guidance, suggested_question
-
 
 def render_strategy_payload(payload: dict, container, prefix: str = "latest"):
     """구조화된 전략 응답을 Streamlit 컴포넌트로 시각화."""
@@ -437,7 +429,6 @@ def render_strategy_payload(payload: dict, container, prefix: str = "latest"):
         if monitoring_cadence:
             container.markdown(f"**Monitoring Cadence:** {monitoring_cadence}")
 
-
 def render_followup_panel(guidance_text: str, evidence_list, suggested_question: str, ui_key: int):
     """Follow-up 응답을 상세 가이드와 후속 질문 버튼으로 표시."""
     if not guidance_text:
@@ -493,88 +484,31 @@ def load_personas(path="personas.json"):
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        st.error("⚠️ personas.json 파일을 찾을 수 없습니다. prompt_generator.py를 먼저 실행하세요.")
+        st.error("⚠️ personas.json 파일을 찾을 수 없습니다. persona_generator.py를 먼저 실행하세요.")
         return []
 
 personas = load_personas()
 
 # ─────────────────────────────
-# 3. 업종 분류
+# 3. 업종 분류 & 프랜차이즈 판별
 # ─────────────────────────────
 BRAND_KEYWORDS_BY_CATEGORY = {
     "카페/디저트": {
-        "파리",
-        "뚜레",
-        "배스",
-        "베스",
-        "베스킨",
-        "던킨",
-        "크리스피",
-        "투썸",
-        "이디",
-        "빽다",
-        "메가",
-        "메머",
-        "매머",
-        "컴포",
-        "컴포즈",
-        "할리",
-        "스타벅",
-        "탐앤",
-        "공차",
-        "요거",
-        "와플대",
-        "와플",
-        "폴바셋",
+        "파리","뚜레","배스","베스","베스킨","던킨","크리스피","투썸","이디","빽다","메가",
+        "메머","매머","컴포","컴포즈","할리","스타벅","탐앤","공차","요거","와플대","와플","폴바셋",
     },
     "한식": {
-        "교촌",
-        "네네",
-        "호식",
-        "둘둘",
-        "처갓",
-        "굽네",
-        "bbq",
-        "bhc",
-        "맘스",
-        "맘스터치",
-        "죠스",
-        "신전",
-        "국대",
-        "명랑",
-        "두끼",
-        "땅스",
-        "명륜",
-        "하남",
-        "등촌",
-        "봉추",
-        "원할",
-        "본죽",
-        "원할머니",
-        "한촌",
-        "백채",
-        "한솥",
-        "바르",
+        "교촌","네네","호식","둘둘","처갓","굽네","bbq","bhc","맘스","맘스터치","죠스","신전","국대",
+        "명랑","두끼","땅스","명륜","하남","등촌","봉추","원할","본죽","원할머니","한촌","백채","한솥","바르",
     },
-    "양식/세계요리": {
-        "도미",
-        "피자헛",
-        "파파",
-        "파파존스",
-        "롯데",
-        "버거킹",
-        "써브",
-        "서브웨이",
-        "이삭",
-        "프랭",
-        "프랭크",
-        "피자스쿨",
-    },
-    "주점/주류": {
-        "한신",
-    },
+    "양식/세계요리": {"도미","피자헛","파파","파파존스","롯데","버거킹","써브","서브웨이","이삭","프랭","프랭크","피자스쿨"},
+    "주점/주류": {"한신"},
 }
 
+def _normalize_name(name: str) -> str:
+    n = name.lower()
+    n = re.sub(r"[\s\*\-\(\)\[\]{}_/\\.|,!?&^%$#@~`+=:;\"']", "", n)
+    return n
 
 def classify_hpsn_mct(name: str) -> str:
     normalized = _normalize_name(name)
@@ -583,48 +517,18 @@ def classify_hpsn_mct(name: str) -> str:
             return category
 
     nm = name.strip().lower()
-    if any(k in nm for k in ["카페", "커피", "디저트", "도너츠", "빙수", "와플", "마카롱"]):
-        return "카페/디저트"
-    if any(k in nm for k in ["한식", "국밥", "백반", "찌개", "감자탕", "분식", "치킨", "한정식", "죽"]):
-        return "한식"
-    if any(k in nm for k in ["일식", "초밥", "돈가스", "라멘", "덮밥", "소바", "이자카야"]):
-        return "일식"
-    if any(k in nm for k in ["중식", "짬뽕", "짜장", "마라", "훠궈", "딤섬"]):
-        return "중식"
-    if any(k in nm for k in ["양식", "스테이크", "피자", "파스타", "햄버거", "샌드위치", "토스트", "버거"]):
-        return "양식/세계요리"
-    if any(k in nm for k in ["주점", "호프", "맥주", "와인바", "소주", "요리주점", "이자카야"]):
-        return "주점/주류"
+    if any(k in nm for k in ["카페","커피","디저트","도너츠","빙수","와플","마카롱"]): return "카페/디저트"
+    if any(k in nm for k in ["한식","국밥","백반","찌개","감자탕","분식","치킨","한정식","죽"]): return "한식"
+    if any(k in nm for k in ["일식","초밥","돈가스","라멘","덮밥","소바","이자카야"]): return "일식"
+    if any(k in nm for k in ["중식","짬뽕","짜장","마라","훠궈","딤섬"]): return "중식"
+    if any(k in nm for k in ["양식","스테이크","피자","파스타","햄버거","샌드위치","토스트","버거"]): return "양식/세계요리"
+    if any(k in nm for k in ["주점","호프","맥주","와인바","소주","요리주점","이자카야"]): return "주점/주류"
     return "기타"
 
-# ─────────────────────────────
-# 4. 프랜차이즈 판별
-# ─────────────────────────────
 BRAND_KEYWORDS = {kw for kws in BRAND_KEYWORDS_BY_CATEGORY.values() for kw in kws}
-
-# 2) 오검출을 줄이기 위한 예외/모호 토큰 (상황 보고 추가)
-AMBIGUOUS_NEGATIVES = {
-    # 너무 일반적이거나 지역/지명/업종성 토큰
-    "카페", "커피", "왕십", "성수", "행당", "종로", "전주", "춘천", "와인", "치킨", "피자", "분식",
-    "국수", "초밥", "스시", "곱창", "돼지", "한우", "막창", "수산", "축산", "베이", "브레", "브레드",
-}
-
-def _normalize_name(name: str) -> str:
-    """
-    - 마스킹(*), 공백, 특수문자 제거
-    - 소문자 변환(영문 대비)
-    """
-    n = name.lower()
-    n = re.sub(r"[\s\*\-\(\)\[\]{}_/\\.|,!?&^%$#@~`+=:;\"']", "", n)
-    return n
+AMBIGUOUS_NEGATIVES = {"카페","커피","왕십","성수","행당","종로","전주","춘천","와인","치킨","피자","분식","국수","초밥","스시","곱창","돼지","한우","막창","수산","축산","베이","브레","브레드"}
 
 def is_franchise(name: str) -> bool:
-    """
-    데이터셋2의 '상호명' 문자열만으로 프랜차이즈 여부를 휴리스틱으로 판정.
-    - 1차: 브랜드 키워드 포함 여부
-    - 2차: 모호/일반 토큰만으로 이루어진 경우 제외
-    - 3차(선택): '점' 패턴(지점명) 보정
-    """
     n = _normalize_name(name)
     if not n:
         return False
@@ -638,14 +542,10 @@ def is_franchise(name: str) -> bool:
         return True
     return False
 
-
 def _store_age_label_from_months(months: int) -> str:
-    if months <= 12:
-        return "신규"
-    if months <= 24:
-        return "전환기"
+    if months <= 12: return "신규"
+    if months <= 24: return "전환기"
     return "오래된"
-
 
 def extract_initial_store_info(text: str) -> tuple:
     """복합 문장에서 상점 정보와 질문을 분리해 추출."""
@@ -655,9 +555,7 @@ def extract_initial_store_info(text: str) -> tuple:
         return info_updates, question
 
     sentences = re.split(r"(?<=[?.!])\s+", text.strip())
-    info_sentences = []
-    question_sentences = []
-
+    info_sentences, question_sentences = [], []
     for sentence in sentences:
         stripped = sentence.strip()
         if not stripped:
@@ -668,7 +566,6 @@ def extract_initial_store_info(text: str) -> tuple:
             info_sentences.append(stripped)
 
     if not question_sentences and info_sentences:
-        # 마지막 문장을 질문으로 간주
         question_sentences.append(info_sentences.pop())
 
     context_text = " ".join(info_sentences) if info_sentences else text.strip()
@@ -703,29 +600,21 @@ def extract_initial_store_info(text: str) -> tuple:
         info_updates["고객연령대"] = "50대 이상 고객 중심"
 
     behaviors = []
-    if "단골" in text or "재방문" in text:
-        behaviors.append("재방문 고객")
-    if "신규" in text or "새손님" in text or "새 손님" in text:
-        behaviors.append("신규 고객")
-    if "거주" in text or "주민" in text:
-        behaviors.append("거주 고객")
-    if "직장" in text or "오피스" in text or "회사" in text:
-        behaviors.append("직장인 고객")
-    if "유동" in text or "지나가는" in text or "관광" in text:
-        behaviors.append("유동 고객")
-
+    if "단골" in text or "재방문" in text: behaviors.append("재방문 고객")
+    if "신규" in text or "새손님" in text or "새 손님" in text: behaviors.append("신규 고객")
+    if "거주" in text or "주민" in text: behaviors.append("거주 고객")
+    if "직장" in text or "오피스" in text or "회사" in text: behaviors.append("직장인 고객")
+    if "유동" in text or "지나가는" in text or "관광" in text: behaviors.append("유동 고객")
     if behaviors:
         info_updates["고객행동"] = " + ".join(sorted(set(behaviors)))
 
     return info_updates, question
 
-
 # ─────────────────────────────
-# 5. Gemini Streaming 호출
+# 4. Gemini Streaming 호출
 # ─────────────────────────────
 DEFAULT_MODEL = "gemini-2.5-flash"
 
-# https://cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/2-5-flash
 def stream_gemini(
     prompt,
     model=DEFAULT_MODEL,
@@ -740,64 +629,45 @@ def stream_gemini(
     """안정적인 스트리밍 + 완료사유 점검 + 친절한 에러"""
     status_placeholder = st.empty()
     status_placeholder.info(status_text)
-    step_interval = 2.0
-    step_state = {"idx": 0, "next_time": time.time() + step_interval}
 
     try:
         gmodel = genai.GenerativeModel(model)
-        cfg = {
-            "temperature": temperature,
-            "max_output_tokens": max_tokens,
-            "top_p": 0.9,
-            "top_k": 40,
-        }
-
+        cfg = {"temperature": temperature, "max_output_tokens": max_tokens, "top_p": 0.9, "top_k": 40}
         stream = gmodel.generate_content(prompt, generation_config=cfg, stream=True)
 
         placeholder = output_placeholder or st.empty()
         placeholder.info(progress_text)
         full_text = ""
 
-        # 1) 스트리밍 수집 (chunk.text가 없을 수도 있으니 candidates도 확인)
         for event in stream:
             piece = ""
             if getattr(event, "text", None):
                 piece = event.text
             elif getattr(event, "candidates", None):
-                # 일부 이벤트는 delta 형태로 들어와서 text가 비어 있음
                 for c in event.candidates:
-                    # 각 candidate의 content에서 추가 텍스트를 안전하게 추출
                     try:
                         piece += "".join([p.text or "" for p in c.content.parts])
                     except Exception:
                         pass
-
             if piece:
                 full_text += piece
 
-        # 2) 최종 해석 (finish_reason/blocked 여부 확인)
         try:
-            stream.resolve()  # 최종 상태/메타 확보
+            stream.resolve()
         except Exception:
-            # resolve에서 오류가 나도 본문이 있으면 계속 진행
             pass
 
         if not full_text:
             placeholder.warning("응답이 비어 있습니다. 다시 시도해 주세요.")
 
-        # finish_reason/blocked 안내
         try:
             cand0 = stream.candidates[0]
             fr = getattr(cand0, "finish_reason", None)
-            block = getattr(cand0, "safety_ratings", None)
         except Exception:
-            fr, block = None, None
+            fr = None
 
-        # 3) 잘림/차단 안내 + 이어쓰기 버튼
         if fr == "MAX_TOKENS":
             st.info("ℹ️ 응답이 길어 중간에 잘렸어요. 아래 버튼으로 이어서 생성할 수 있어요.")
-            if st.button("➕ 이어서 더 생성"):
-                continue_from(full_text, prompt, gmodel, cfg)
         elif fr == "SAFETY":
             st.warning("⚠️ 안전 필터로 일부 내용이 숨겨졌을 수 있어요. 표현을 다듬어 다시 시도해보세요.")
 
@@ -815,51 +685,223 @@ def stream_gemini(
         )
         return None
 
-
-def continue_from(previous_text: str, original_prompt: str, gmodel, cfg):
-    """
-    MAX_TOKENS로 잘렸을 때 이어쓰기. 원본 문맥을 간단히 요약·복원해 연속성 유지.
-    """
-    followup_prompt = (
-        "아래 초안의 이어지는 내용을 같은 톤/서식으로 계속 작성하세요. "
-        "불필요한 반복 없이 Phase 나머지와 KPI, 실행 체크리스트를 마저 채워주세요.\n\n"
-        "=== 지금까지 생성된 초안 ===\n"
-        f"{previous_text}\n"
-        "=== 원래의 요구사항 ===\n"
-        f"{original_prompt}\n"
-    )
-
-    try:
-        stream2 = gmodel.generate_content(followup_prompt, generation_config=cfg, stream=True)
-        placeholder = st.empty()
-        full2 = ""
-        for ev in stream2:
-            if getattr(ev, "text", None):
-                full2 += ev.text
-                placeholder.markdown(full2 + "▌")
-        placeholder.markdown(full2)
-        st.session_state.chat_history.append({"role": "assistant", "content": full2})
-    except Exception as e:
-        st.error(
-            "🚨 이어쓰기 중 오류가 발생했습니다.\n\n"
-            f"**에러 유형**: {type(e).__name__}\n"
-            f"**메시지**: {e}"
-        )
-
 # ─────────────────────────────
-# 6. 페르소나 매칭
+# 5. 페르소나 매칭
 # ─────────────────────────────
 def find_persona(업종, 프랜차이즈, 점포연령="미상", 고객연령대="미상", 고객행동="미상"):
     for p in personas:
         if p["업종"] == 업종 and p["프랜차이즈여부"] == 프랜차이즈:
             return p
-    return None  # None 그대로 반환
+    return None
 
 # ─────────────────────────────
-# 7. Streamlit UI 설정
+# 6. ENCODED_MCT 전용 모드 (새로 추가)
+# ─────────────────────────────
+@st.cache_data
+def load_mct_prompts(default_path="store_scores_with_clusterlabel_v2_with_targets_updown.csv", uploaded_file=None):
+    """
+    ENCODED_MCT → {'prompt_str', 'analysis_prompt_updown'} 매핑 로드.
+    - 업로드 파일이 있으면 그걸 우선 사용
+    - 없으면 기본 경로를 시도
+    """
+    text = ""
+    src = ""
+    mapping = {}
+    try:
+        if uploaded_file is not None:
+            text = uploaded_file.getvalue().decode("utf-8-sig")
+            src = "uploaded"
+        else:
+            with open(default_path, "r", encoding="utf-8-sig") as f:
+                text = f.read()
+            src = default_path
+        reader = csv.DictReader(io.StringIO(text))
+        for row in reader:
+            k = (row.get("ENCODED_MCT") or "").strip()
+            if not k:
+                continue
+            mapping[k] = {
+                "prompt_str": (row.get("prompt_str") or "").strip(),
+                "analysis_prompt_updown": (row.get("analysis_prompt_updown") or "").strip(),
+            }
+        return mapping, src, None
+    except Exception as e:
+        return {}, src, str(e)
+
+def build_mct_consult_prompt(info: dict, encoded_mct: str, p_main: str, p_updn: str) -> str:
+    """
+    신한카드 ENCODED_MCT 기반 전문 컨설팅 프롬프트.
+    - 기존 JSON 구조 가이드를 그대로 활용(ensure_data_evidence)
+    """
+    name = info.get("상점명") or "-"
+    industry = info.get("업종") or "-"
+    franchise = info.get("프랜차이즈여부") or "-"
+    store_age = info.get("점포연령") or "-"
+    customer_age = info.get("고객연령대") or "-"
+    behavior = info.get("고객행동") or "-"
+
+    base = (
+        "당신은 소상공인 식당/리테일의 운영·마케팅 컨설턴트입니다.\n"
+        "신한카드 ENCODED_MCT를 기반으로 **데이터 근거 중심의 실행 전략**만 제시하세요.\n"
+        "모든 전략은 가능한 한 **정량 지표(%, %p, 건수, 원)**로 근거를 제시하세요.\n\n"
+        "=== 상점 카드 ===\n"
+        f"- 상점명: {name}\n"
+        f"- 업종: {industry}\n"
+        f"- 형태: {franchise}\n"
+        f"- 점포연령: {store_age}\n"
+        f"- 고객연령대: {customer_age}\n"
+        f"- 고객행동: {behavior}\n\n"
+        "=== ENCODED_MCT ===\n"
+        f"- 코드: {encoded_mct}\n"
+        f"- 외부 프롬프트 요약:\n{p_main or '-'}\n\n"
+        f"- 목표 업/다운 지시문:\n{p_updn or '-'}\n\n"
+        "정렬 규칙(필수): 제안한 각 전략은 위 '목표 업/다운 지시문' 중 어떤 지표(↑/↓/유지)를 겨냥하는지 명확히 매핑하세요.\n"
+    )
+    return ensure_data_evidence(base)
+
+def render_mct_tab():
+    """사이드바 전환형: ENCODED_MCT 전용 컨설턴트 화면"""
+    st.header("💳 신한카드 ENCODED_MCT 컨설턴트")
+    st.markdown(
+        "안녕하세요 👋 저는 **AI 마케팅 컨설턴트**입니다.\n\n"
+        "상점명을 입력해주시면 업종과 프랜차이즈 여부를 추정하고, "
+        "ENCODED_MCT(상점 세부 코드)를 기반으로 **신한카드 세부 정보**에 정렬된 전문 솔루션을 제공합니다.\n\n"
+        "예: `교촌치킨`, `파리바게뜨`, `카페행당점`, `왕십리돼지국밥`"
+    )
+
+    # 전용 세션 상태
+    if "mct_history" not in st.session_state:
+        st.session_state.mct_history = []
+    if "mct_info" not in st.session_state:
+        st.session_state.mct_info = {}
+    if "mct_latest_strategy" not in st.session_state:
+        st.session_state.mct_latest_strategy = {}
+
+    with st.expander("📄 ENCODED_MCT 소스 CSV (선택 업로드)", expanded=False):
+        mct_csv_file = st.file_uploader("프롬프트 CSV 업로드", type=["csv"], key="mct_csv_uploader")
+        st.caption("기본 파일명: store_scores_with_clusterlabel_v2_with_targets_updown.csv (프로젝트 루트)")
+
+    col_a, col_b = st.columns([2, 1])
+    with col_a:
+        store_name = st.text_input("상점명", key="mct_store_name", placeholder="예: 교촌치킨 행당점")
+        encoded_mct = st.text_input("상점 세부 코드 (ENCODED_MCT)", key="mct_code", placeholder="예: SEG_KR_05")
+    with col_b:
+        if store_name:
+            guess_industry = classify_hpsn_mct(store_name)
+            guess_fr = "프랜차이즈" if is_franchise(store_name) else "개인점포"
+            st.metric("예상 업종", guess_industry)
+            st.metric("예상 형태", guess_fr)
+
+    # 이전 대화 표시
+    for msg in st.session_state.mct_history:
+        with st.chat_message(msg["role"]):
+            if msg.get("type") == "strategy":
+                c = st.container()
+                render_strategy_payload(msg.get("data", {}), c, prefix=msg.get("id", "mct_hist"))
+            else:
+                st.markdown(msg["content"])
+
+    # 생성 버튼
+    generate = st.button("🚀 전문 솔루션 생성", use_container_width=True, disabled=not encoded_mct)
+    if generate:
+        info = {
+            "상점명": store_name or "",
+            "업종": classify_hpsn_mct(store_name) if store_name else "",
+            "프랜차이즈여부": ("프랜차이즈" if (store_name and is_franchise(store_name)) else "개인점포") if store_name else "",
+            "점포연령": st.session_state.mct_info.get("점포연령", ""),
+            "고객연령대": st.session_state.mct_info.get("고객연령대", ""),
+            "고객행동": st.session_state.mct_info.get("고객행동", ""),
+        }
+        st.session_state.mct_info.update({k: v for k, v in info.items() if v})
+
+        # CSV 로드 & 스니펫 추출
+        mapping, src, err = load_mct_prompts(uploaded_file=mct_csv_file)
+        p_main, p_updn = "", ""
+        if err:
+            st.warning(f"CSV 로드 실패: {err}")
+        else:
+            data = mapping.get(encoded_mct.strip())
+            if data:
+                p_main = data.get("prompt_str", "")
+                p_updn = data.get("analysis_prompt_updown", "")
+            else:
+                st.info("해당 ENCODED_MCT에 대한 외부 프롬프트가 없어 **기본 로직**으로 진행합니다.")
+
+        prompt = build_mct_consult_prompt(st.session_state.mct_info, encoded_mct, p_main, p_updn)
+        with st.chat_message("assistant"):
+            st.markdown("### 📈 생성된 마케팅 전략 결과")
+            ph = st.empty()
+            result = stream_gemini(
+                prompt,
+                output_placeholder=ph,
+                status_text="ENCODED_MCT 전문 전략을 생성 중입니다... ⏳",
+                progress_text="외부 프롬프트와 상점 정보를 정렬 중... 📋",
+                success_text="✅ 전략 생성이 완료되었습니다."
+            )
+            if result:
+                payload = parse_strategy_payload(result)
+                if payload:
+                    ph.empty()
+                    cid = str(uuid.uuid4())
+                    box = st.container()
+                    render_strategy_payload(payload, box, prefix=cid)
+                    st.session_state.mct_latest_strategy = {"payload": payload, "raw": result}
+                    st.session_state.mct_history.append({"role": "assistant", "type": "strategy", "data": payload, "id": cid, "raw": result})
+                else:
+                    st.markdown(result)
+                    st.session_state.mct_latest_strategy = {"payload": None, "raw": result}
+                    st.session_state.mct_history.append({"role": "assistant", "content": result})
+
+    # 후속 질문
+    mct_q = st.chat_input("ENCODED_MCT 기반 추가 질문을 입력하세요...", key="mct_chat_input")
+    if mct_q:
+        st.session_state.mct_history.append({"role": "user", "content": mct_q})
+        latest = st.session_state.get("mct_latest_strategy", {})
+        payload = latest.get("payload")
+        raw = latest.get("raw", "")
+
+        base_follow = build_followup_prompt(mct_q, st.session_state.mct_info, payload, raw)
+        if encoded_mct:
+            base_follow += (
+                "\n\n[ENCODED_MCT 힌트]\n"
+                f"- 코드: {encoded_mct}\n"
+                "- 위 전략의 각 항목을 '목표 지표(↑/↓/유지)'와 계속 매핑하세요.\n"
+            )
+        with st.chat_message("assistant"):
+            ph2 = st.empty()
+            ans = stream_gemini(
+                base_follow,
+                output_placeholder=ph2,
+                status_text="질문에 대한 답변을 정리하고 있어요... 💡",
+                progress_text="기존 전략과 ENCODED_MCT 정보를 바탕으로 가이드를 준비 중... 🧭",
+                success_text="✅ 답변이 준비되었습니다."
+            )
+            if ans:
+                parsed = parse_followup_payload(ans)
+                if parsed and (parsed.get("summary_points") or parsed.get("detailed_guidance")):
+                    pts = (parsed.get("summary_points") or [])[:2]
+                    ev = (parsed.get("evidence_mentions") or [])[:3]
+                    txt = parsed.get("detailed_guidance", "")
+                    guidance = "\n\n".join([s for s in ["\n".join(pts), txt] if s.strip()])
+                    render_followup_panel(guidance, ev, (parsed.get("suggested_question") or ""), ui_key=1)
+                    st.session_state.mct_history.append({"role": "assistant", "content": guidance})
+                else:
+                    st.markdown(ans)
+                    st.session_state.mct_history.append({"role": "assistant", "content": ans})
+
+# ─────────────────────────────
+# 7. Streamlit UI 설정 (모드 전환 추가)
 # ─────────────────────────────
 st.set_page_config(page_title="AI 마케팅 컨설턴트", layout="wide")
 st.title("💬 AI 마케팅 컨설턴트")
+
+# 👉 사이드바 모드 선택: 기존 상담 / ENCODED_MCT 컨설턴트
+mode = st.sidebar.radio("모드", ["기존 상담", "ENCODED_MCT 컨설턴트"], index=0)
+if mode == "ENCODED_MCT 컨설턴트":
+    render_mct_tab()
+    st.stop()
+
+# ── 이하: 기존 상담 화면(원본 로직 유지) ──────────────────────────
 
 if st.button("🔄 새 상담 시작"):
     st.session_state.clear()
@@ -942,7 +984,6 @@ def add_message(role, content=None, **kwargs):
         message["content"] = content if content is not None else ""
     st.session_state.chat_history.append(message)
 
-
 def answer_question_with_current_info(question_text: str):
     """수집된 정보만으로 사용자의 질문에 답변."""
     info = st.session_state.get("info", {})
@@ -993,10 +1034,7 @@ def answer_question_with_current_info(question_text: str):
             warning_text = "답변을 생성하지 못했습니다. 질문을 조금 다르게 해보시면 도움이 될 수 있어요."
             placeholder.warning(warning_text)
             add_message("assistant", warning_text)
-            st.session_state.latest_strategy = {
-                "payload": None,
-                "raw": "",
-            }
+            st.session_state.latest_strategy = {"payload": None, "raw": ""}
 
     if get_missing_info_fields(info):
         st.session_state.pending_question = question_text
@@ -1006,7 +1044,7 @@ def answer_question_with_current_info(question_text: str):
     st.session_state.shown_followup_suggestion = False
 
 # ─────────────────────────────
-# 8. 대화 로직
+# 8. 대화 로직 (기존)
 # ─────────────────────────────
 if user_input:
     use_pending = st.session_state.pop("use_pending_question", False)
@@ -1090,28 +1128,22 @@ if user_input:
 
         behaviors = []
         for p in parts:
-            if "재" in p or "단골" in p:
-                behaviors.append("재방문 고객")
-            if "신" in p or "새" in p:
-                behaviors.append("신규 고객")
-            if "거주" in p or "주민" in p:
-                behaviors.append("거주 고객")
-            if "직장" in p or "오피스" in p or "회사" in p:
-                behaviors.append("직장인 고객")
-            if "유동" in p or "지나" in p or "관광" in p:
-                behaviors.append("유동 고객")
+            if "재" in p or "단골" in p: behaviors.append("재방문 고객")
+            if "신" in p or "새" in p: behaviors.append("신규 고객")
+            if "거주" in p or "주민" in p: behaviors.append("거주 고객")
+            if "직장" in p or "오피스" in p or "회사" in p: behaviors.append("직장인 고객")
+            if "유동" in p or "지나" in p or "관광" in p: behaviors.append("유동 고객")
 
         behaviors = list(set(behaviors)) or ["일반 고객"]
         st.session_state.info["고객행동"] = " + ".join(behaviors)
 
-        # ... 고객행동까지 수집된 뒤:
+        # persona 기반 or fallback 전략 생성
         info = st.session_state.info
         persona = find_persona(
             info["업종"], info["프랜차이즈여부"],
             info["점포연령"], info["고객연령대"], info["고객행동"]
         )
 
-        # ① persona prompt 또는 ② fallback prompt
         if persona and "prompt" in persona:
             prompt = ensure_data_evidence(persona["prompt"])
         else:
@@ -1126,9 +1158,6 @@ if user_input:
                 "응답은 불릿과 표를 적절히 섞어 간결하게 작성하세요."
             )
 
-        #with st.expander("📜 프롬프트 보기"):
-        #    st.code(prompt, language="markdown")
-
         add_message("assistant", "이제 AI 상담사가 맞춤형 마케팅 전략을 생성합니다... ⏳")
 
         with st.chat_message("assistant"):
@@ -1136,7 +1165,7 @@ if user_input:
             content_placeholder = st.empty()
             st.session_state.is_generating = True
             try:
-                result = stream_gemini(prompt, output_placeholder=content_placeholder)  # ⬅️ 스트리밍 출력
+                result = stream_gemini(prompt, output_placeholder=content_placeholder)
             finally:
                 st.session_state.is_generating = False
             if result:
@@ -1146,40 +1175,21 @@ if user_input:
                     content_placeholder.empty()
                     strategy_container = st.container()
                     render_strategy_payload(payload, strategy_container, prefix=message_id)
-                    st.session_state["latest_strategy"] = {
-                        "payload": payload,
-                        "raw": result,
-                    }
+                    st.session_state["latest_strategy"] = {"payload": payload, "raw": result}
                     st.session_state.shown_followup_suggestion = False
-                    add_message(
-                        "assistant",
-                        type="strategy",
-                        data=payload,
-                        id=message_id,
-                        raw=result,
-                    )
+                    add_message("assistant", type="strategy", data=payload, id=message_id, raw=result)
                 else:
                     summary_points = extract_executive_summary(result)
                     if summary_points:
-                        summary_markdown = "#### ⚡ 핵심 요약\n\n" + "\n".join(
-                            f"- {point}" for point in summary_points
-                        )
+                        summary_markdown = "#### ⚡ 핵심 요약\n\n" + "\n".join(f"- {point}" for point in summary_points)
                         content_placeholder.markdown(summary_markdown)
-                        st.session_state["latest_strategy"] = {
-                            "payload": None,
-                            "raw": result,
-                        }
+                        st.session_state["latest_strategy"] = {"payload": None, "raw": result}
                         st.session_state.shown_followup_suggestion = False
                         add_message("assistant", summary_markdown)
                     else:
-                        fallback_notice = (
-                            "구조화된 응답을 표시하지 못했습니다. 다시 시도하거나 프롬프트를 조정해 주세요."
-                        )
+                        fallback_notice = "구조화된 응답을 표시하지 못했습니다. 다시 시도하거나 프롬프트를 조정해 주세요."
                         content_placeholder.warning(fallback_notice)
-                        st.session_state["latest_strategy"] = {
-                            "payload": None,
-                            "raw": result,
-                        }
+                        st.session_state["latest_strategy"] = {"payload": None, "raw": result}
                         st.session_state.shown_followup_suggestion = False
                         add_message("assistant", fallback_notice)
     else:
@@ -1232,30 +1242,18 @@ if user_input:
                 st.session_state.is_generating = False
             if followup_answer:
                 parsed_followup = parse_followup_payload(followup_answer)
-                if (
-                    parsed_followup
-                    and (
-                        parsed_followup.get("summary_points")
-                        or parsed_followup.get("detailed_guidance")
-                    )
-                ):
+                if parsed_followup and (parsed_followup.get("summary_points") or parsed_followup.get("detailed_guidance")):
                     summary_points = (parsed_followup.get("summary_points") or [])[:2]
                     evidence_mentions = (parsed_followup.get("evidence_mentions") or [])[:3]
                     detail_text = parsed_followup.get("detailed_guidance", "")
-
                     guidance_parts = []
-                    if summary_points:
-                        guidance_parts.append("\n".join(point for point in summary_points))
-                    if detail_text:
-                        guidance_parts.append(detail_text)
+                    if summary_points: guidance_parts.append("\n".join(point for point in summary_points))
+                    if detail_text: guidance_parts.append(detail_text)
                     guidance_text = "\n\n".join(part.strip() for part in guidance_parts if part.strip())
                     guidance_text = guidance_text or detail_text or followup_answer
                     suggested_question = (parsed_followup.get("suggested_question") or "").strip()
                     if not suggested_question:
-                        suggested_question = default_suggested_question(
-                            st.session_state.get("info", {}),
-                            user_input,
-                        )
+                        suggested_question = default_suggested_question(st.session_state.get("info", {}), user_input)
 
                     ui_key = st.session_state.get("followup_ui_key", 0) + 1
                     st.session_state.followup_ui_key = ui_key
@@ -1279,10 +1277,7 @@ if user_input:
                 else:
                     ui_key = st.session_state.get("followup_ui_key", 0) + 1
                     st.session_state.followup_ui_key = ui_key
-                    fallback_suggestion = default_suggested_question(
-                        st.session_state.get("info", {}),
-                        user_input,
-                    )
+                    fallback_suggestion = default_suggested_question(st.session_state.get("info", {}), user_input)
                     st.session_state.followup_ui = {
                         "guidance": followup_answer,
                         "evidence": [],
