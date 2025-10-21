@@ -1,0 +1,190 @@
+--- a/streamlit_app.py
++++ b/streamlit_app.py
+@@
+-import os
+-import io
+-import csv
++import os
++import io
++import csv
++import glob
++import numpy as np
+@@
+ import streamlit as st
+ import google.generativeai as genai
++try:
++    import faiss  # optional: 없으면 NumPy 폴백
++except Exception:
++    faiss = None
++from sentence_transformers import SentenceTransformer
+@@
+ DEFAULT_MODEL = "gemini-2.5-flash"
+@@
+ def ensure_data_evidence(prompt: str) -> str:
+@@
+     return updated
++
++# ─────────────────────────────
++# 외부 지식베이스(subtitle_summary) 로더 + 검색
++# ─────────────────────────────
++@st.cache_resource(show_spinner=False)
++def load_external_kb(dir_path: str, embed_model: str = None):
++    """subtitle_summary/summary 폴더의 JSON들을 임베딩/색인. 없으면 None."""
++    model_name = os.getenv("EMBED_MODEL_NAME", embed_model or "jhgan/ko-sbert-nli")
++    files = glob.glob(os.path.join(dir_path, "*.json"))
++    docs, metas = [], []
++    for fp in files:
++        try:
++            with open(fp, "r", encoding="utf-8") as f:
++                data = json.load(f)
++            if isinstance(data, dict):
++                data = [data]
++            for i, d in enumerate(data):
++                ctx = d.get("context", {})
++                prob = d.get("problem", [])
++                sol = d.get("solution", [])
++                text = f"상황: {ctx}\n문제점: {prob}\n해결: {sol}"
++                docs.append(text)
++                metas.append((os.path.basename(fp), i))
++        except Exception:
++            continue
++    if not docs:
++        return None
++    model = SentenceTransformer(model_name)
++    doc_emb = model.encode(docs, normalize_embeddings=True)
++    doc_emb = np.asarray(doc_emb, dtype=np.float32)
++    if faiss is not None:
++        index = faiss.IndexFlatIP(doc_emb.shape[1])
++        index.add(doc_emb)
++    else:
++        index = None
++
++    def search(query: str, top_k: int = 3) -> str:
++        if not query:
++            return ""
++        q = model.encode([query], normalize_embeddings=True)
++        q = np.asarray(q, dtype=np.float32)
++        if index is not None:
++            D, I = index.search(q, top_k)
++            idxs = I[0]
++        else:
++            sims = doc_emb @ q[0]
++            idxs = np.argsort(-sims)[:top_k]
++        lines = ["[외부 지식베이스 상위 근거]"]
++        for rank, idx in enumerate(idxs, 1):
++            if idx < 0 or idx >= len(docs):
++                continue
++            file, j = metas[idx]
++            snippet = docs[idx].replace("\n", " ")[:200]
++            lines.append(f"{rank}. 파일:{file} #{j} | {snippet}")
++        return "\n".join(lines)
++
++    return {"search": search}
++
++def build_kb_query(info: dict, extra: str = "") -> str:
++    """상점 카드 + 추가 문구로 KB 질의문 생성."""
++    keys = ["상점명", "업종", "프랜차이즈여부", "점포연령", "고객연령대", "고객행동"]
++    parts = [f"{k}:{info[k]}" for k in keys if info.get(k)]
++    if extra:
++        parts.append(str(extra))
++    return " ".join(parts)
+@@
+ def render_mct_tab():
+@@
+-    # 생성 버튼
++    # 생성 버튼
+     generate = st.button("🚀 전문 솔루션 생성", use_container_width=True, disabled=not encoded_mct)
+     if generate:
+@@
+-        prompt = build_mct_consult_prompt(st.session_state.mct_info, encoded_mct, p_main, p_updn)
++        prompt = build_mct_consult_prompt(st.session_state.mct_info, encoded_mct, p_main, p_updn)
++        # 외부 KB 근거 주입 (옵션)
++        kb_opts = st.session_state.get("_kb_opts", {})
++        if kb_opts.get("use"):
++            kb = load_external_kb(kb_opts.get("dir", "./subtitle_summary/summary"))
++            if kb:
++                kb_q = build_kb_query(st.session_state.mct_info, encoded_mct)
++                kb_ev = kb["search"](kb_q, top_k=int(kb_opts.get("topk", 3)))
++                if kb_ev:
++                    prompt += f"\n\n{kb_ev}\n"
+@@
+-    # 후속 질문
++    # 후속 질문
+     mct_q = st.chat_input("ENCODED_MCT 기반 추가 질문을 입력하세요...", key="mct_chat_input")
+     if mct_q:
+@@
+-        with st.chat_message("assistant"):
++        with st.chat_message("assistant"):
+             ph2 = st.empty()
+-            ans = stream_gemini(
++            # 외부 KB 근거 (옵션) 추가
++            kb_opts = st.session_state.get("_kb_opts", {})
++            if kb_opts.get("use"):
++                kb = load_external_kb(kb_opts.get("dir", "./subtitle_summary/summary"))
++                if kb:
++                    base_follow += "\n\n" + kb["search"](build_kb_query(st.session_state.mct_info, mct_q),
++                                                          top_k=int(kb_opts.get("topk", 3)))
++            ans = stream_gemini(
+                 base_follow,
+@@
+ st.set_page_config(page_title="AI 마케팅 컨설턴트", layout="wide")
+ st.title("💬 AI 마케팅 컨설턴트")
+ 
+-# 👉 사이드바 모드 선택: 기존 상담 / ENCODED_MCT 컨설턴트
++# 👉 사이드바 모드 선택: 기존 상담 / ENCODED_MCT 컨설턴트
+ mode = st.sidebar.radio("모드", ["기존 상담", "ENCODED_MCT 컨설턴트"], index=0)
++# 🔎 외부 지식베이스 옵션
++st.sidebar.divider()
++st.sidebar.markdown("**외부 지식베이스(subtitle_summary) 사용**")
++use_kb = st.sidebar.checkbox("근거 주입 사용", value=False)
++kb_dir = st.sidebar.text_input("KB 폴더 경로", "./subtitle_summary/summary", disabled=not use_kb)
++kb_topk = st.sidebar.slider("근거 개수", 1, 5, 3, disabled=not use_kb)
++st.session_state["_kb_opts"] = {"use": use_kb, "dir": kb_dir, "topk": kb_topk}
+ if mode == "ENCODED_MCT 컨설턴트":
+     render_mct_tab()
+     st.stop()
+@@
+-        if persona and "prompt" in persona:
+-            prompt = ensure_data_evidence(persona["prompt"])
+-        else:
+-            prompt = ensure_data_evidence(
++        if persona and "prompt" in persona:
++            prompt = ensure_data_evidence(persona["prompt"])
++        else:
++            prompt = ensure_data_evidence(
+                 "다음 상점 정보를 기반으로 3~5단계 Phase별 맞춤형 마케팅 전략을 제안하세요.\n"
+                 "각 Phase는 목표, 핵심 액션(채널·컨텐츠·오퍼), 예산범위, 예상 KPI, 다음 Phase로 넘어가는 기준을 포함하세요.\n\n"
+                 f"- 업종: {info['업종']}\n"
+                 f"- 형태: {info['프랜차이즈여부']}\n"
+                 f"- 점포연령: {info['점포연령']}\n"
+                 f"- 주요 고객연령대: {info['고객연령대']}\n"
+                 f"- 고객행동 특성: {info['고객행동']}\n"
+                 "응답은 불릿과 표를 적절히 섞어 간결하게 작성하세요."
+             )
++        # 외부 KB 근거 주입 (옵션)
++        kb_opts = st.session_state.get("_kb_opts", {})
++        if kb_opts.get("use"):
++            kb = load_external_kb(kb_opts.get("dir", "./subtitle_summary/summary"))
++            if kb:
++                kb_q = build_kb_query(info, st.session_state.get("pending_question") or "")
++                kb_ev = kb["search"](kb_q, top_k=int(kb_opts.get("topk", 3)))
++                if kb_ev:
++                    prompt += f"\n\n{kb_ev}\n"
+@@
+-        followup_prompt = build_followup_prompt(
++        followup_prompt = build_followup_prompt(
+             user_input,
+             st.session_state.get("info", {}),
+             strategy_payload,
+             raw_strategy,
+         )
++        # 외부 KB 근거 주입 (옵션)
++        kb_opts = st.session_state.get("_kb_opts", {})
++        if kb_opts.get("use"):
++            kb = load_external_kb(kb_opts.get("dir", "./subtitle_summary/summary"))
++            if kb:
++                followup_prompt += "\n\n" + kb["search"](
++                    build_kb_query(st.session_state.get("info", {}), user_input),
++                    top_k=int(kb_opts.get("topk", 3))
++                )
+
