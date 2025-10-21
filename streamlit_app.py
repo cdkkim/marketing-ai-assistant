@@ -112,18 +112,39 @@ def ensure_data_evidence(prompt: str) -> str:
 # ─────────────────────────────
 # 3) 공통 유틸
 # ─────────────────────────────
+def _extract_bullet_content(text_line: str) -> str | None:
+    s = text_line.strip()
+    if not s:
+        return None
+    m1 = re.match(r"^[-\*\u2022]\s*(.+)", s)
+    if m1:
+        return m1.group(1).strip()
+    m2 = re.match(r"^\d+[.)]\s*(.+)", s)
+    if m2:
+        return m2.group(1).strip()
+    return None
+
+def _looks_like_evidence_line(text: str) -> bool:
+    """간단한 휴리스틱으로 근거 전용 라인을 식별."""
+    if not text:
+        return False
+    # 불릿/번호 접두 제거 후 비교
+    normalized = re.sub(r"^[\-\*\u2022\d\.\)\(\s]+", "", text).strip()
+    normalized = normalized.replace(":", " ").strip()
+    lower = normalized.lower()
+    evidence_prefixes = (
+        "근거",
+        "데이터 근거",
+        "evidence",
+        "증빙",
+        "supporting data",
+    )
+    return any(lower.startswith(prefix) for prefix in evidence_prefixes)
+
 def extract_executive_summary(markdown_text: str, max_points: int = 4):
     """비구조 응답에서 핵심 불릿을 추출."""
     lines = markdown_text.splitlines()
     summary = []
-
-    def _bullet(s: str):
-        s = s.strip()
-        m1 = re.match(r"^[-\*\u2022]\s*(.+)", s)
-        if m1: return m1.group(1).strip()
-        m2 = re.match(r"^\d+[.)]\s*(.+)", s)
-        if m2: return m2.group(1).strip()
-        return None
 
     # '# 요약' 섹션 우선 탐색
     start = None
@@ -134,8 +155,8 @@ def extract_executive_summary(markdown_text: str, max_points: int = 4):
         for line in lines[start+1:]:
             if line.strip().startswith("#"):
                 break
-            v = _bullet(line)
-            if v:
+            v = _extract_bullet_content(line)
+            if v and not _looks_like_evidence_line(v) and v not in summary:
                 summary.append(v)
                 if len(summary) >= max_points:
                     break
@@ -143,8 +164,8 @@ def extract_executive_summary(markdown_text: str, max_points: int = 4):
     # 없으면 전체에서 불릿 추출
     if not summary:
         for line in lines:
-            v = _bullet(line)
-            if v:
+            v = _extract_bullet_content(line)
+            if v and not _looks_like_evidence_line(v) and v not in summary:
                 summary.append(v)
                 if len(summary) >= max_points:
                     break
@@ -154,11 +175,172 @@ def extract_executive_summary(markdown_text: str, max_points: int = 4):
         sentences = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", markdown_text))
         for s in sentences:
             s = s.strip()
-            if s:
+            if s and not _looks_like_evidence_line(s) and s not in summary:
                 summary.append(s)
                 if len(summary) >= max_points:
                     break
     return summary
+
+def get_action_guidelines_from_session(max_items: int = 2) -> list[str]:
+    """세션에 저장된 최신 전략에서 액션 가이드를 추출."""
+    guidelines: list[str] = []
+    owner_guidelines: list[str] = []
+    owner_keywords = ("점주", "사장", "오너", "대표", "매장주", "운영자")
+
+    def harvest(payload):
+        if not payload:
+            return
+        for phase in payload.get("phases") or []:
+            for act in phase.get("actions") or []:
+                task = (act.get("task") or "").strip()
+                if not task or task in guidelines or task in owner_guidelines:
+                    continue
+                owner = (act.get("owner") or "").strip()
+                if owner and any(k in owner for k in owner_keywords):
+                    owner_guidelines.append(task)
+                else:
+                    guidelines.append(task)
+                if len(owner_guidelines) + len(guidelines) >= max_items:
+                    return
+
+    payload_candidates = []
+    if "latest_strategy" in st.session_state:
+        latest = st.session_state.get("latest_strategy") or {}
+        payload_candidates.append(latest.get("payload"))
+    if "mct_latest_strategy" in st.session_state:
+        latest_mct = st.session_state.get("mct_latest_strategy") or {}
+        payload_candidates.append(latest_mct.get("payload"))
+
+    for payload in payload_candidates:
+        harvest(payload)
+        if len(owner_guidelines) + len(guidelines) >= max_items:
+            break
+
+    ordered = []
+    for task in owner_guidelines:
+        if task not in ordered:
+            ordered.append(task)
+        if len(ordered) >= max_items:
+            break
+    if len(ordered) < max_items:
+        for task in guidelines:
+            if task not in ordered:
+                ordered.append(task)
+            if len(ordered) >= max_items:
+                break
+
+    return ordered[:max_items]
+
+def _extract_guidelines_from_text(text: str, max_items: int = 2) -> list[str]:
+    """상세 가이드 텍스트에서 휴리스틱으로 실행 지침 문장을 추출."""
+    if not text:
+        return []
+
+    keywords = (
+        "하세요", "하십시오", "해보세요", "해 보세요", "해 주세요", "해주", "실행", "도입",
+        "만드", "유도", "운영", "제공", "준비", "구축", "강화", "업데이트", "확실히",
+        "활용", "등록", "설정", "점검", "관리", "증정", "혜택", "쿠폰", "이벤트",
+        "서비스", "기획", "추천", "권장", "유지", "테스트", "연결", "확장", "유치"
+    )
+
+    candidates: list[str] = []
+    for line in text.splitlines():
+        cand = _extract_bullet_content(line)
+        if cand:
+            candidates.append(cand)
+
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if normalized:
+        for sentence in re.split(r"(?<=[.!?])\s+", normalized):
+            sentence = sentence.strip()
+            if sentence:
+                candidates.append(sentence)
+
+    action_guidelines: list[str] = []
+    for cand in candidates:
+        if any(keyword in cand for keyword in keywords):
+            cleaned = cand.strip()
+            if cleaned and cleaned not in action_guidelines:
+                action_guidelines.append(cleaned)
+            if len(action_guidelines) >= max_items:
+                break
+
+    return action_guidelines[:max_items]
+
+def extract_action_guidelines_with_gemini(text: str, max_items: int = 2) -> list[str]:
+    """Gemini 모델로 실행 지침을 추출."""
+    if not text or not GOOGLE_API_KEY:
+        return []
+
+    def _gather_response_text(response) -> str:
+        """응답 객체에서 텍스트 파트를 안전하게 추출."""
+        if not response:
+            return ""
+        pieces: list[str] = []
+        candidates = getattr(response, "candidates", None)
+        if candidates:
+            for cand in candidates:
+                content = getattr(cand, "content", None)
+                parts = getattr(content, "parts", None) if content else None
+                if parts:
+                    for part in parts:
+                        part_text = getattr(part, "text", None)
+                        if part_text:
+                            pieces.append(part_text)
+            if pieces:
+                return "".join(pieces)
+        try:
+            text_attr = response.text  # type: ignore[attr-defined]
+            return text_attr if isinstance(text_attr, str) else ""
+        except Exception:
+            return ""
+
+    prompt = (
+        "당신은 로컬 상권 점주를 돕는 시니어 마케팅 컨설턴트입니다.\n"
+        "아래 상세 가이드를 읽고, 매장 점주가 직접 실행할 수 있는 설득력 있는 행동 제안을 "
+        f"최대 {max_items}개 도출하세요.\n"
+        "- 이미 상세 가이드에 있는 문장을 그대로 사용하거나 자연스럽게 다듬어도 됩니다.\n"
+        "- 본사나 외부 대행사가 아닌 점주가 바로 실행할 수 있는 항목만 선택하세요.\n"
+        "- 각 항목은 제안/권장 어조로 1~2문장으로 작성하고, 첫 문장에는 실행 행동을, 두 번째 문장에는 기대 효과나 팁을 덧붙이세요.\n"
+        "- 같은 내용을 반복하지 마세요.\n\n"
+        "=== 상세 가이드 ===\n"
+        f"{text.strip()}\n\n"
+        "=== 응답 형식 ===\n"
+        "{\n"
+        '  \"action_guidelines\": [\"점주 실행 지침 1\", \"점주 실행 지침 2\"]\n'
+        "}\n"
+        "- JSON 외의 텍스트는 출력하지 마세요.\n"
+        "- 필요한 항목만 포함하세요."
+    )
+
+    try:
+        gmodel = genai.GenerativeModel(DEFAULT_MODEL)
+        cfg = {"temperature": 0.2, "max_output_tokens": 65000, "top_p": 0.8, "top_k": 32}
+        response = gmodel.generate_content(prompt, generation_config=cfg)
+        raw = _gather_response_text(response)
+        cleaned = strip_json_artifacts(raw)
+        if not cleaned:
+            return []
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            values = parsed.get("action_guidelines")
+            if isinstance(values, list):
+                return [str(v).strip() for v in values[:max_items] if str(v).strip()]
+    except json.JSONDecodeError as err:
+        logging.info("Gemini action guideline JSON 파싱 실패: %s", err)
+    except ValueError as err:
+        # finish_reason이 2(SAFETY) 등일 때 response.text 접근 등에서 ValueError가 발생 가능
+        logging.info("Gemini action guideline 텍스트를 추출하지 못했습니다: %s", err)
+    except Exception as err:
+        logging.warning("Gemini action guideline 추출 실패: %s", err)
+    return []
+
+def extract_action_guidelines(text: str, max_items: int = 2) -> list[str]:
+    """상세 가이드에서 실행 지침을 추출 (Gemini 우선, 휴리스틱 보조)."""
+    guidelines = extract_action_guidelines_with_gemini(text, max_items=max_items)
+    if not guidelines:
+        guidelines = _extract_guidelines_from_text(text, max_items=max_items)
+    return guidelines[:max_items]
 
 def strip_json_artifacts(text: str) -> str:
     cleaned = (text or "").strip().replace("▌", "")
@@ -317,6 +499,49 @@ def render_followup_panel(guidance_text: str, evidence_list, suggested_question:
     if not guidance_text:
         return
     st.markdown("### 📘 상세 가이드")
+    summary_points = [
+        p for p in extract_executive_summary(guidance_text, max_points=3)
+        if not _looks_like_evidence_line(p)
+    ]
+    action_guidelines = extract_action_guidelines(guidance_text, max_items=2)
+    if len(action_guidelines) < 2:
+        fallback = get_action_guidelines_from_session(max_items=2)
+        for item in fallback:
+            if item not in action_guidelines:
+                action_guidelines.append(item)
+            if len(action_guidelines) >= 2:
+                break
+    action_guidelines = action_guidelines[:2]
+    clean_guidelines: list[str] = []
+    for guideline in action_guidelines:
+        formatted = guideline.strip()
+        if not formatted:
+            continue
+        if "action guideline" not in formatted.lower():
+            formatted = f"{formatted}"
+        if formatted not in clean_guidelines:
+            clean_guidelines.append(formatted)
+        if len(clean_guidelines) >= 2:
+            break
+
+    clean_summary: list[str] = []
+    for point in summary_points:
+        if point and point not in clean_guidelines and point not in clean_summary:
+            clean_summary.append(point)
+
+    max_quick_items = 3
+    summary_slots = max(0, max_quick_items - len(clean_guidelines))
+    display_points: list[str] = clean_summary[:summary_slots]
+    if not display_points and not clean_summary and clean_guidelines:
+        # 요약이 없으면 행동 지침만 사용
+        display_points = []
+    for guideline in clean_guidelines:
+        if len(display_points) >= max_quick_items:
+            break
+        display_points.append(guideline)
+    if display_points:
+        st.markdown("**빠른 요약:**")
+        st.markdown("\n".join(f"- {item}" for item in display_points))
     st.markdown(guidance_text)
     if evidence_list:
         st.markdown("**근거:**")
