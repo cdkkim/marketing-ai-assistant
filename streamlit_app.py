@@ -780,7 +780,21 @@ def render_mct_tab():
             guess_fr = "프랜차이즈" if is_franchise(store_name) else "개인점포"
             st.metric("예상 업종", guess_industry)
             st.metric("예상 형태", guess_fr)
-
+    # --- (입력 박스 다음) ENCODED_MCT KPI 미리보기 -----------------
+    if encoded_mct:
+        mapping_preview, src_preview, err_preview = load_mct_prompts(uploaded_file=mct_csv_file)
+        if err_preview:
+            st.warning(f"CSV 로드 실패: {err_preview}")
+        else:
+            row_preview = mapping_preview.get(encoded_mct.strip())
+            if row_preview:
+                render_mct_kpi(
+                    row_preview.get("perf_score_global"),
+                    row_preview.get("success_label")
+                )
+            else:
+                st.info("해당 ENCODED_MCT에 대한 KPI 데이터가 없습니다.")
+    # ----------------------------------------------------------------
     # 이전 대화 표시
     for msg in st.session_state.mct_history:
         with st.chat_message(msg["role"]):
