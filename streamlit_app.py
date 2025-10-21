@@ -100,6 +100,13 @@ FOLLOWUP_RESPONSE_GUIDE = """
 6. suggested_question은 사용자가 바로 물어볼 수 있는 짧은 후속 질문 1개만 제안하세요.
 """
 
+OWNER_ADDRESS_GUIDE = """
+호칭 지침:
+- 사용자를 지칭할 때는 상호명이나 별칭 없이 '사장님'이라고만 부르세요.
+- 다른 호칭이 필요하면 '사장님'을 반복해서 사용하세요.
+"""
+OWNER_ADDRESS_MARKER = "사용자를 지칭할 때는 상호명이나 별칭 없이 '사장님'이라고만 부르세요."
+
 def ensure_data_evidence(prompt: str) -> str:
     """프롬프트에 데이터 근거/구조 가이드가 없으면 추가."""
     updated = prompt.rstrip()
@@ -107,6 +114,16 @@ def ensure_data_evidence(prompt: str) -> str:
         updated += "\n\n" + DATA_EVIDENCE_GUIDE.strip()
     if '"phase_titles"' not in updated and "응답 형식 지침(중요)" not in updated:
         updated += "\n\n" + STRUCTURED_RESPONSE_GUIDE.strip()
+    return ensure_owner_address(updated)
+
+def ensure_owner_address(prompt: str) -> str:
+    """사용자 호칭을 일관되게 유지하도록 지침을 추가."""
+    updated = prompt.rstrip()
+    if OWNER_ADDRESS_MARKER not in updated:
+        if updated:
+            updated += "\n\n" + OWNER_ADDRESS_GUIDE.strip()
+        else:
+            updated = OWNER_ADDRESS_GUIDE.strip()
     return updated
 
 # ─────────────────────────────
@@ -1167,7 +1184,7 @@ def build_followup_prompt(question: str, info: dict, strategy_payload: dict | No
         "데이터 근거 항목이나 KPI가 있다면 그대로 언급하거나 수치로 답변에 반영하세요.\n"
         f"{FOLLOWUP_RESPONSE_GUIDE}"
     )
-    return prompt
+    return ensure_owner_address(prompt)
 
 def build_direct_question_prompt(info: dict, question: str, missing_fields=None) -> str:
     missing_fields = missing_fields or []
@@ -1188,7 +1205,7 @@ def build_direct_question_prompt(info: dict, question: str, missing_fields=None)
         f"{missing_note}\n"
         f"{DIRECT_RESPONSE_GUIDE}"
     )
-    return prompt
+    return ensure_owner_address(prompt)
 
 # ─────────────────────────────
 # 12) Streamlit UI (모드 전환 + 사이드바 KB 옵션)
