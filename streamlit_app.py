@@ -11,6 +11,7 @@ import logging
 import numpy as np
 import streamlit as st
 import google.generativeai as genai
+import plotly.graph_objects as go
 
 # (선택) FAISS가 없으면 NumPy로 폴백
 try:
@@ -669,25 +670,103 @@ def _to_pct(value_str):
     except Exception:
         return None
 
-def render_mct_kpi(perf_score_global: str | float | None, success_label: str | None):
-    perf_pct = _to_pct(perf_score_global) if perf_score_global not in (None, "") else None
-    label = (success_label or "").strip() or "데이터 없음"
+def render_mct_kpi(score=None, label=None, store_type=None, margin=None, key="mct_kpi"):
+    print(store_type,margin)
+    # -------- 숫자/텍스트 안전 변환 --------
+    def to_float(x):
+        try:
+            if x is None or x == "" or str(x).lower() == "null":
+                return np.nan
+            return float(x)
+        except Exception:
+            return np.nan
 
-    st.subheader("📊 MCT 성과 요약")
-    c1, c2 = st.columns(2)
-    if perf_pct is not None:
-        c1.metric("Perf Score (Global)", f"{perf_pct}%")
-    else:
-        c1.metric("Perf Score (Global)", "데이터 없음")
+    score = to_float(score)                       # 0~100 스케일 기대
+    margin = to_float(margin)                     # 0~1 또는 %일 수 있음
+    if not np.isnan(margin):
+        # margin이 1 이하이면 비율(0~1)로 보고 %로 환산
+        margin = margin*100
 
-    # 간단한 뱃지 느낌
-    badge = "✅ 성공" if label.lower().startswith(("succ","성공")) else ("⚠️ 주의" if "warn" in label.lower() else f"ℹ️ {label}")
-    c2.metric("Success Level", badge)
+    label = (label or "").strip()
+    store_type = (store_type or "—").strip()
 
-    # 진행바(있을 때만)
-    if perf_pct is not None:
-        st.progress(perf_pct)
+    # -------- 색상 팔레트/상태 --------
+    lbl_color = {
+        "High":  "#22c55e",   # green-500
+        "Mid":   "#f59e0b",   # amber-500
+        "Low":   "#ef4444",   # red-500
+    }.get(label, "#64748b")    # slate-500
 
+    # -------- Plotly 게이지(perf_score_global) --------
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=0 if np.isnan(score) else score,
+        number={"suffix": " / 100", "font": {"size": 26}},
+        gauge={
+            "axis": {"range": [0,100]},
+            "bar":  {"color": lbl_color},
+            "steps": [
+                {"range":[0,40],  "color":"#fee2e2"},  # red-100
+                {"range":[40,80], "color":"#fffbeb"},  # amber-50
+                {"range":[80,100],"color":"#dcfce7"},  # green-100
+            ],
+            "threshold": {"line":{"color":"#111827","width":2},
+                          "thickness":0.85,
+                          "value": 0 if np.isnan(score) else score}
+        },
+        domain={"x":[0,1], "y":[0,1]},
+        title={"text":"Perf. Score(Global)", "font":{"size":14}}
+    ))
+    fig.update_layout(margin=dict(l=10,r=10,t=40,b=0), height=210)
+
+    # --------- UI 레이아웃 ---------
+    st.markdown("""
+        <style>
+        .pill {display:inline-block;padding:2px 10px;border-radius:999px;
+               font-weight:600;font-size:12px;color:white;}
+        .pill-type {background:#0ea5e9;}        /* sky-500 */
+        .pill-label {background:%s;}            /* success_label 색 */
+        .kpi-card {border:1px solid #e5e7eb;border-radius:10px;padding:12px;}
+        .kpi-sub {color:#6b7280;font-size:12px;}
+        </style>
+    """ % lbl_color, unsafe_allow_html=True)
+
+    with st.container():
+        col1, col2 = st.columns([1.2, 1.0])
+
+        # 게이지 + 라벨/타입
+        with col1:
+            st.plotly_chart(fig, use_container_width=True, key=f"{key}_gauge")
+            # 라인: 유형/라벨
+            st.markdown(
+                f"""
+                <div class="kpi-card">
+                  <span class="pill pill-type">타입: {store_type}</span>
+                  &nbsp;
+                  <span class="pill pill-label">레벨: {label or '—'}</span>
+                </div>
+                """, unsafe_allow_html=True
+            )
+
+        # 이익률 + 원형 progress 느낌의 텍스트 블록
+        with col2:
+            # margin metric
+            mtxt = "—" if np.isnan(margin) else f"{margin:.1f}%"
+            st.metric("추정 이익률(%)", mtxt)
+            st.caption("※동일 업종/상권 기반 추정치")
+
+            # 작은 표 형태로 보조 KPI 요약(텍스트)
+            st.markdown(
+                f"""
+                <div class="kpi-card">
+                  <div class="kpi-sub">AI 매장 평가 결과</div>
+                  <div>- 매장 레벨: <b style="color:{lbl_color}">{label or '—'}</b></div>
+                  <div>- 매장 점수: <b>{'—' if np.isnan(score) else f'{score:.1f}'}</b> / 100</div>
+                  <div>- 매장 타입: <b>{store_type}</b></div>
+                  <div>- 영업이익률(%): <b>{mtxt}</b></div>
+                </div>
+                """, unsafe_allow_html=True
+            )
 def extract_initial_store_info(text: str) -> tuple[dict, str | None]:
     """복합 문장에서 상점 정보/질문을 분리 추출."""
     info_updates, question = {}, None
@@ -878,35 +957,13 @@ def build_kb_query(info: dict, extra: str = "") -> str:
 # ─────────────────────────────
 # 10) ENCODED_MCT 전용 (CSV 연동 + 전용 화면)
 # ─────────────────────────────
-# @st.cache_data
-# def load_mct_prompts(default_path="store_scores_with_clusterlabel_v2_with_targets_updown.csv", uploaded_file=None):
-#     """ENCODED_MCT → {'prompt_str','analysis_prompt_updown'} 매핑 로드."""
-#     text = ""
-#     src = ""
-#     mapping = {}
-#     try:
-#         if uploaded_file is not None:
-#             text = uploaded_file.getvalue().decode("utf-8-sig")
-#             src = "uploaded"
-#         else:
-#             with open(default_path, "r", encoding="utf-8-sig") as f:
-#                 text = f.read()
-#             src = default_path
-#         reader = csv.DictReader(io.StringIO(text))
-#         for row in reader:
-#             k = (row.get("ENCODED_MCT") or "").strip()
-#             if not k: continue
-#             mapping[k] = {
-#                 "prompt_str": (row.get("prompt_str") or "").strip(),
-#                 "analysis_prompt_updown": (row.get("analysis_prompt_updown") or "").strip(),
-#             }
-#         return mapping, src, None
-#     except Exception as e:
-#         return {}, src, str(e)
 @st.cache_data
 def load_mct_prompts(default_path="store_scores_with_clusterlabel_v2_with_targets_updown.csv", uploaded_file=None):
     """
-    ENCODED_MCT → {'prompt_str','analysis_prompt_updown','perf_score_global','success_label'} 매핑 로드.
+    ENCODED_MCT → {
+        'prompt_str','analysis_prompt_updown','perf_score_global','success_label',
+        'store_type_rule','margin_assumed'
+    } 매핑 로드.
     - 업로드 파일이 있으면 그걸 우선 사용, 없으면 기본 경로를 시도
     - 헤더 이름이 애매하게 다를 수 있어 '포함 토큰'으로 유연 탐색
     """
@@ -922,6 +979,7 @@ def load_mct_prompts(default_path="store_scores_with_clusterlabel_v2_with_target
         return None
 
     try:
+        # 1️⃣ 파일 읽기
         if uploaded_file is not None:
             text = uploaded_file.getvalue().decode("utf-8-sig")
             src = "uploaded"
@@ -930,18 +988,18 @@ def load_mct_prompts(default_path="store_scores_with_clusterlabel_v2_with_target
                 text = f.read()
             src = default_path
 
+        # 2️⃣ CSV DictReader
         reader = csv.DictReader(io.StringIO(text))
         for row in reader:
             keys = list(row.keys())
-            # 필수 키들 위치 찾기
+
+            # 3️⃣ 필수 키 탐색
             key_mct = _find_key(keys, "encoded", "mct") or "ENCODED_MCT"
             if not (row.get(key_mct) or "").strip():
                 continue
 
             key_prompt  = _find_key(keys, "prompt", "str") or "prompt_str"
             key_updown  = _find_key(keys, "analysis", "updown") or "analysis_prompt_updown"
-
-            # 새로 추가: perf_score_global / success_label (이름 변형도 커버)
             key_perf    = (_find_key(keys, "perf", "score", "global")
                            or _find_key(keys, "perf", "score")
                            or "perf_score_global")
@@ -949,14 +1007,27 @@ def load_mct_prompts(default_path="store_scores_with_clusterlabel_v2_with_target
                            or _find_key(keys, "success")
                            or "success_label")
 
+            # 새로 추가: store_type_rule / margin_assumed
+            key_store_type = (_find_key(keys, "store", "type")
+                              or _find_key(keys, "storetyperule")
+                              or "store_type_rule")
+            key_margin = (_find_key(keys, "margin")
+                          or _find_key(keys, "margin", "assumed")
+                          or "margin_assumed")
+
+            # 4️⃣ 실제 값 읽기
             mct = (row.get(key_mct) or "").strip()
             mapping[mct] = {
                 "prompt_str": (row.get(key_prompt) or "").strip(),
                 "analysis_prompt_updown": (row.get(key_updown) or "").strip(),
                 "perf_score_global": (row.get(key_perf) or "").strip(),
                 "success_label": (row.get(key_success) or "").strip(),
+                "store_type_rule": (row.get(key_store_type) or "").strip(),
+                "margin_assumed": (row.get(key_margin) or "").strip(),
             }
+
         return mapping, src, None
+
     except Exception as e:
         return {}, src, str(e)
 
@@ -978,7 +1049,7 @@ def build_mct_consult_prompt(info: dict, encoded_mct: str, p_main: str, p_updn: 
         f"- 점포연령: {store_age}\n"
         f"- 고객연령대: {customer_age}\n"
         f"- 고객행동: {behavior}\n\n"
-        "=== ENCODED_MCT ===\n"
+        "=== 카드 매출 데이터===\n"
         f"- 코드: {encoded_mct}\n"
         f"- 외부 프롬프트 요약:\n{p_main or '-'}\n\n"
         f"- 목표 업/다운 지시문:\n{p_updn or '-'}\n\n"
@@ -992,12 +1063,13 @@ def build_mct_consult_prompt(info: dict, encoded_mct: str, p_main: str, p_updn: 
     return ensure_data_evidence(base)
 
 def render_mct_tab():
-    st.header("💳 신한카드 ENCODED_MCT 컨설턴트")
+    st.header("💳 신한카드 데이터 집중형 컨설턴트")
     st.markdown(
-        "안녕하세요 👋 저는 **AI 마케팅 컨설턴트**입니다.\n\n"
-        "상점명을 입력해주시면 업종과 프랜차이즈 여부를 추정하고, "
-        "ENCODED_MCT(상점 세부 코드)를 기반으로 **신한카드 세부 정보**에 정렬된 전문 솔루션을 제공합니다.\n\n"
-        "예: `교촌치킨`, `파리바게뜨`, `카페행당점`, `왕십리돼지국밥`"
+        "안녕하세요 👋 저는 **AI 컨설턴트-데이터분석 모드**입니다.\n\n"
+        "등록하신 상점코드을 입력해주시면,  "
+        "**신한카드** DB에 접근하여 전문화된 데이터 분석기반 전문 솔루션을 제공합니다.\n\n"
+        "AI가 여러 정보를 분석하여 `매장 점수`, `매장 레벨`, `매장 타입`, `영업이익`을 제공하며, \n\n"
+        "TV속 유명 쉐프들과 함께 더 나은 발전을 위한 솔루션을 상세히 설계해줍니다"
     )
 
     # 전용 세션 상태
@@ -1008,7 +1080,7 @@ def render_mct_tab():
     if "mct_latest_strategy" not in st.session_state:
         st.session_state.mct_latest_strategy = {}
 
-    with st.expander("📄 ENCODED_MCT 소스 CSV (선택 업로드)", expanded=False):
+    with st.expander("📄 카드 매출 데이터 신규 적용 (선택 업로드)", expanded=False):
         mct_csv_file = st.file_uploader("프롬프트 CSV 업로드", type=["csv"], key="mct_csv_uploader")
         st.caption("기본 파일명: store_scores_with_clusterlabel_v2_with_targets_updown.csv (프로젝트 루트)")
 
@@ -1028,11 +1100,13 @@ def render_mct_tab():
         if err_preview:
             st.warning(f"CSV 로드 실패: {err_preview}")
         else:
-            row_preview = mapping_preview.get(encoded_mct.strip())
-            if row_preview:
+            row = mapping_preview.get(encoded_mct.strip())
+            if row:
                 render_mct_kpi(
-                    row_preview.get("perf_score_global"),
-                    row_preview.get("success_label")
+                    score=row.get("perf_score_global"),
+                    label=row.get("success_label"),
+                    store_type=row.get("store_type_rule"),
+                    margin=row.get("margin_assumed")
                 )
             else:
                 st.info("해당 ENCODED_MCT에 대한 KPI 데이터가 없습니다.")
@@ -1070,7 +1144,7 @@ def render_mct_tab():
                 p_main = data.get("prompt_str", "")
                 p_updn = data.get("analysis_prompt_updown", "")
             else:
-                st.info("해당 ENCODED_MCT에 대한 외부 프롬프트가 없어 기본 로직으로 진행합니다.")
+                st.info("해당 상점코드에 대한 외부 프롬프트가 없어 기본 로직으로 진행합니다.")
 
         prompt = build_mct_consult_prompt(st.session_state.mct_info, encoded_mct, p_main, p_updn)
 
@@ -1090,7 +1164,7 @@ def render_mct_tab():
             result = stream_gemini(
                 prompt,
                 output_placeholder=ph,
-                status_text="ENCODED_MCT 전문 전략을 생성 중입니다... ⏳",
+                status_text="사장님의 매장 데이터와 동일 업종 매장 데이터를 가져와 전략을 분석중 입니다... ⏳",
                 progress_text="외부 프롬프트와 상점 정보를 정렬 중... 📋",
                 success_text="✅ 전략 생성이 완료되었습니다."
             )
@@ -1109,7 +1183,7 @@ def render_mct_tab():
                     st.session_state.mct_history.append({"role": "assistant", "content": result})
 
     # 후속 질문
-    mct_q = st.chat_input("ENCODED_MCT 기반 추가 질문을 입력하세요...", key="mct_chat_input")
+    mct_q = st.chat_input("상점코드 기반 추가 질문을 입력하세요...", key="mct_chat_input")
     if mct_q:
         st.session_state.mct_history.append({"role": "user", "content": mct_q})
         latest = st.session_state.get("mct_latest_strategy", {})
@@ -1119,7 +1193,7 @@ def render_mct_tab():
         base_follow = build_followup_prompt(mct_q, st.session_state.mct_info, payload, raw)
         if encoded_mct:
             base_follow += (
-                "\n\n[ENCODED_MCT 힌트]\n"
+                "\n\n[상점코드 힌트]\n"
                 f"- 코드: {encoded_mct}\n"
                 "- 위 전략의 각 항목을 '목표 지표(↑/↓/유지)'와 계속 매핑하세요.\n"
             )
@@ -1138,7 +1212,7 @@ def render_mct_tab():
                 base_follow,
                 output_placeholder=ph2,
                 status_text="질문에 대한 답변을 정리하고 있어요... 💡",
-                progress_text="기존 전략과 ENCODED_MCT 정보를 바탕으로 가이드를 준비 중... 🧭",
+                progress_text="기존 전략과 사장님 매장 맞춤형 정보를 바탕으로 가이드를 준비 중... 🧭",
                 success_text="✅ 답변이 준비되었습니다."
             )
             if ans:
@@ -1213,15 +1287,15 @@ def build_direct_question_prompt(info: dict, question: str, missing_fields=None)
 st.set_page_config(page_title="AI 마케팅 컨설턴트", layout="wide")
 st.title("💬 AI 마케팅 컨설턴트")
 
-mode = st.sidebar.radio("모드", ["기존 상담", "ENCODED_MCT 컨설턴트"], index=0)
+mode = st.sidebar.radio("모드", ["AI 컨설턴트 - 전략수립", "AI 컨설턴트 - 데이터분석"], index=0)
 st.sidebar.divider()
-st.sidebar.markdown("**외부 지식베이스(subtitle_summary) 사용**")
-use_kb = st.sidebar.checkbox("근거 주입 사용", value=False)
-kb_dir = st.sidebar.text_input("KB 폴더 경로", "./subtitle_summary/summary", disabled=not use_kb)
-kb_topk = st.sidebar.slider("근거 개수", 1, 5, 3, disabled=not use_kb)
+st.sidebar.markdown("**전문 상담사 활성화**")
+use_kb = st.sidebar.checkbox("전문 상담사 등록", value=False)
+kb_dir = st.sidebar.text_input("전문상담사 지식베이스", "./subtitle_summary/summary", disabled=not use_kb)
+kb_topk = st.sidebar.slider("전문상담사 인원", 1, 5, 3, disabled=not use_kb)
 st.session_state["_kb_opts"] = {"use": use_kb, "dir": kb_dir, "topk": kb_topk}
 
-if mode == "ENCODED_MCT 컨설턴트":
+if mode == "AI 컨설턴트 - 데이터분석":
     render_mct_tab()
     st.stop()
 
