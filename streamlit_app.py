@@ -8,6 +8,7 @@ import glob
 import time
 import uuid
 import logging
+from datetime import datetime, date
 import numpy as np
 import streamlit as st
 import google.generativeai as genai
@@ -629,6 +630,11 @@ def _normalize_name(name: str) -> str:
     n = re.sub(r"[\s\*\-\(\)\[\]{}_/\\.|,!?&^%$#@~`+=:;\"']", "", n)
     return n
 
+def looks_like_encoded_mct(text: str) -> bool:
+    """간단한 규칙으로 ENCODED_MCT 형태(10자리 영문+숫자)를 판별."""
+    s = (text or "").strip()
+    return len(s) == 10 and s.isalnum()
+
 def classify_hpsn_mct(name: str) -> str:
     normalized = _normalize_name(name or "")
     for category, keywords in BRAND_KEYWORDS_BY_CATEGORY.items():
@@ -661,6 +667,25 @@ def _store_age_label_from_months(months: int) -> str:
     if months <= 12: return "신규"
     if months <= 24: return "전환기"
     return "오래된"
+
+def _store_age_from_open_date(open_date: str) -> tuple[str | None, str | None, int | None]:
+    """
+    개업일(YYYYMMDD) 문자열을 받아 점포연령 라벨, 표시용 날짜, 개업 후 경과 개월 수를 반환.
+    """
+    raw = (open_date or "").strip()
+    if len(raw) != 8 or not raw.isdigit():
+        return None, None, None
+    try:
+        opened = datetime.strptime(raw, "%Y%m%d").date()
+    except ValueError:
+        return None, None, None
+    today = date.today()
+    months = (today.year - opened.year) * 12 + (today.month - opened.month)
+    if today.day < opened.day:
+        months -= 1
+    months = max(months, 0)
+    label = _store_age_label_from_months(months)
+    return label, opened.strftime("%Y-%m-%d"), months
 def _to_pct(value_str):
     try:
         x = float(str(value_str).replace("%","").strip())
@@ -1031,6 +1056,33 @@ def load_mct_prompts(default_path="store_scores_with_clusterlabel_v2_with_target
     except Exception as e:
         return {}, src, str(e)
 
+@st.cache_data
+def load_store_master(default_path="data/big_data_set1_f_utf8.csv"):
+    """
+    ENCODED_MCT 기준으로 상점 기본 정보를 매핑한다.
+    반환: (mapping, error)
+    """
+    try:
+        mapping: dict[str, dict[str, str]] = {}
+        with open(default_path, "r", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                code = (row.get("ENCODED_MCT") or "").strip()
+                if not code:
+                    continue
+                mapping[code] = {
+                    "상점명": (row.get("MCT_NM") or "").strip(),
+                    "업종": (row.get("HPSN_MCT_ZCD_NM") or "").strip(),
+                    "소재지": (row.get("MCT_BSE_AR") or "").strip(),
+                    "시군구": (row.get("MCT_SIGUNGU_NM") or "").strip(),
+                    "개업일": (row.get("ARE_D") or "").strip(),
+                }
+        return mapping, None
+    except FileNotFoundError:
+        return {}, f"파일을 찾을 수 없습니다: {default_path}"
+    except Exception as e:  # pragma: no cover - 예외 메시지를 노출하기 위함
+        return {}, str(e)
+
 def build_mct_consult_prompt(info: dict, encoded_mct: str, p_main: str, p_updn: str) -> str:
     name = info.get("상점명") or "-"
     industry = info.get("업종") or "-"
@@ -1086,14 +1138,88 @@ def render_mct_tab():
 
     col_a, col_b = st.columns([2, 1])
     with col_a:
-        store_name = st.text_input("상점명", key="mct_store_name", placeholder="예: 교촌치킨 행당점")
+        store_name_input = st.text_input("상점명", key="mct_store_name", placeholder="예: 교촌치킨 행당점")
         encoded_mct = st.text_input("상점 세부 코드 (ENCODED_MCT)", key="mct_code", placeholder="예: SEG_KR_05")
+
+    store_lookup_error = None
+    store_lookup = None
+    store_name = store_name_input
+
+    if encoded_mct:
+        store_mapping, store_lookup_error = load_store_master()
+        if not store_lookup_error:
+            store_lookup = store_mapping.get(encoded_mct.strip())
+            if store_lookup:
+                fetched_name = store_lookup.get("상점명") or ""
+                if fetched_name:
+                    store_name = fetched_name
+                st.session_state.mct_info.setdefault("ENCODED_MCT", encoded_mct.strip())
+                if fetched_name:
+                    st.session_state.mct_info["상점명"] = fetched_name
+                if store_lookup.get("업종"):
+                    st.session_state.mct_info["업종"] = store_lookup["업종"]
+                if store_lookup.get("소재지"):
+                    st.session_state.mct_info["소재지"] = store_lookup["소재지"]
+                if store_lookup.get("시군구"):
+                    st.session_state.mct_info["시군구"] = store_lookup["시군구"]
+                open_raw = (store_lookup.get("개업일") or "").strip()
+                if open_raw:
+                    st.session_state.mct_info["개업일"] = open_raw
+                age_label, opened_display, _ = _store_age_from_open_date(open_raw)
+                if opened_display:
+                    st.session_state.mct_info["개업일_표준"] = opened_display
+                if age_label:
+                    st.session_state.mct_info["점포연령"] = age_label
+        else:
+            st.warning(f"상점 기본 정보 로드 실패: {store_lookup_error}")
+
     with col_b:
         if store_name:
-            guess_industry = classify_hpsn_mct(store_name)
-            guess_fr = "프랜차이즈" if is_franchise(store_name) else "개인점포"
-            st.metric("예상 업종", guess_industry)
+            guess_industry = st.session_state.mct_info.get("업종") or classify_hpsn_mct(store_name)
+            guess_fr = st.session_state.mct_info.get("프랜차이즈여부")
+            if not guess_fr:
+                guess_fr = "프랜차이즈" if is_franchise(store_name) else "개인점포"
+                st.session_state.mct_info["프랜차이즈여부"] = guess_fr
+            st.metric("예상 업종", guess_industry or "-")
             st.metric("예상 형태", guess_fr)
+
+    if encoded_mct and not store_lookup_error:
+        if store_lookup:
+            raw_open = st.session_state.mct_info.get("개업일") or store_lookup.get("개업일") or "정보 없음"
+            store_age_label = st.session_state.mct_info.get("점포연령")
+            info_cols = st.columns(3)
+            info_cols[0].metric("상점명", store_lookup.get("상점명") or "정보 없음")
+            info_cols[1].metric("업종 분류", store_lookup.get("업종") or "정보 없음")
+            if raw_open == "정보 없음":
+                info_cols[2].metric("개업일", raw_open)
+            else:
+                info_cols[2].metric(
+                    "개업일",
+                    raw_open,
+                    delta=f"{store_age_label} 매장" if store_age_label else None
+                )
+            st.caption("상기 정보는 data/big_data_set1_f_utf8.csv 기준 자동 조회되었습니다.")
+        else:
+            st.info("해당 ENCODED_MCT와 일치하는 상점 기본 정보를 찾을 수 없습니다.")
+
+    if encoded_mct:
+        st.markdown("#### 👥 고객 정보")
+        st.caption("주요 고객 연령대와 행동 특성을 입력해 주세요. 전략 생성 시 반영됩니다.")
+        customer_age = st.text_input(
+            "주요 고객 연령대",
+            value=st.session_state.mct_info.get("고객연령대", ""),
+            key="mct_customer_age",
+            placeholder="예: 30~40대 고객 중심"
+        )
+        customer_behavior = st.text_input(
+            "고객 행동 특성",
+            value=st.session_state.mct_info.get("고객행동", ""),
+            key="mct_customer_behavior",
+            placeholder="예: 재방문 고객 + 직장인 고객"
+        )
+        st.session_state.mct_info["고객연령대"] = customer_age.strip()
+        st.session_state.mct_info["고객행동"] = customer_behavior.strip()
+
     # --- (입력 박스 다음) ENCODED_MCT KPI 미리보기 -----------------
     if encoded_mct:
         mapping_preview, src_preview, err_preview = load_mct_prompts(uploaded_file=mct_csv_file)
@@ -1123,13 +1249,19 @@ def render_mct_tab():
     # 생성 버튼
     generate = st.button("🚀 전문 솔루션 생성", use_container_width=True, disabled=not encoded_mct)
     if generate:
+        franchise = st.session_state.mct_info.get("프랜차이즈여부")
+        if not franchise and store_name:
+            franchise = "프랜차이즈" if is_franchise(store_name) else "개인점포"
         info = {
-            "상점명": store_name or "",
-            "업종": classify_hpsn_mct(store_name) if store_name else "",
-            "프랜차이즈여부": ("프랜차이즈" if (store_name and is_franchise(store_name)) else "개인점포") if store_name else "",
+            "상점명": st.session_state.mct_info.get("상점명") or store_name or "",
+            "업종": st.session_state.mct_info.get("업종") or (classify_hpsn_mct(store_name) if store_name else ""),
+            "프랜차이즈여부": franchise or "",
             "점포연령": st.session_state.mct_info.get("점포연령", ""),
             "고객연령대": st.session_state.mct_info.get("고객연령대", ""),
             "고객행동": st.session_state.mct_info.get("고객행동", ""),
+            "개업일": st.session_state.mct_info.get("개업일", ""),
+            "소재지": st.session_state.mct_info.get("소재지", ""),
+            "시군구": st.session_state.mct_info.get("시군구", ""),
         }
         st.session_state.mct_info.update({k: v for k, v in info.items() if v})
 
@@ -1448,27 +1580,75 @@ if user_input:
 
     # ① 상점명 수집
     if "상점명" not in st.session_state.info:
+        info = st.session_state.info
+        raw_input = (user_input or "").strip()
         info_updates, detected_q = extract_initial_store_info(user_input)
-        name = info_updates.get("상점명") or user_input.strip()
-        st.session_state.info["상점명"] = name
-        st.session_state.info["업종"] = classify_hpsn_mct(name)
-        st.session_state.info["프랜차이즈여부"] = "프랜차이즈" if is_franchise(name) else "개인점포"
+        loaded_from_encoded = False
+        store_record = None
+        store_error = None
+
+        if looks_like_encoded_mct(raw_input):
+            code_key = raw_input.upper()
+            store_mapping, store_error = load_store_master()
+            if store_error:
+                add_message("assistant", f"ENCODED_MCT 정보를 불러오지 못했습니다: {store_error}")
+            else:
+                store_record = store_mapping.get(code_key)
+
+        name_guess = info_updates.get("상점명") or raw_input
+        if store_record:
+            resolved_name = store_record.get("상점명") or name_guess or raw_input
+            info["ENCODED_MCT"] = raw_input.upper()
+            info["상점명"] = resolved_name
+            if store_record.get("업종"):
+                info["업종"] = store_record["업종"]
+            else:
+                info["업종"] = classify_hpsn_mct(resolved_name)
+            if store_record.get("소재지"):
+                info["소재지"] = store_record["소재지"]
+            if store_record.get("시군구"):
+                info["시군구"] = store_record["시군구"]
+            open_raw = (store_record.get("개업일") or "").strip()
+            if open_raw:
+                info["개업일"] = open_raw
+                age_label, _, _ = _store_age_from_open_date(open_raw)
+                if age_label:
+                    info["점포연령"] = age_label
+            info["프랜차이즈여부"] = "프랜차이즈" if is_franchise(resolved_name) else "개인점포"
+            loaded_from_encoded = True
+        else:
+            name = name_guess or raw_input
+            info["상점명"] = name
+            info["업종"] = classify_hpsn_mct(name)
+            info["프랜차이즈여부"] = "프랜차이즈" if is_franchise(name) else "개인점포"
+
         for f in ("점포연령","고객연령대","고객행동"):
-            if info_updates.get(f): st.session_state.info[f] = info_updates[f]
+            if info_updates.get(f):
+                info[f] = info_updates[f]
+
         st.session_state.pending_question = detected_q or user_input
         st.session_state.shown_followup_suggestion = False
 
-        missing = get_missing_info_fields(st.session_state.info)
+        missing = get_missing_info_fields(info)
         if missing:
             nf = missing[0]
             if nf == "점포연령":
                 msg = (
-                    f"'{name}'은(는) **{st.session_state.info['업종']} 업종**이며 "
-                    f"**{st.session_state.info['프랜차이즈여부']}**로 추정됩니다. 🏪\n\n"
+                    f"'{info['상점명']}'은(는) **{info.get('업종','정보 없음')} 업종**이며 "
+                    f"**{info.get('프랜차이즈여부','개인점포')}**로 추정됩니다. 🏪\n\n"
                     "개업 시기가 언제인가요? (예: 6개월 전, 2년 전)"
                 )
             elif nf == "고객연령대":
-                msg = "좋아요 👍 주요 고객층은 어떤 연령대인가요? (20대 / 30~40대 / 50대 이상)"
+                if loaded_from_encoded:
+                    msg = (
+                        f"`{info.get('상점명','해당 매장')}`(ENCODED_MCT {info.get('ENCODED_MCT','')}) "
+                        "데이터를 확인했습니다. 📊\n"
+                        f"- 업종: {info.get('업종','정보 없음')}\n"
+                        f"- 개업일: {info.get('개업일','정보 없음')}\n\n"
+                        "주요 고객층은 어떤 연령대인가요? (20대 / 30~40대 / 50대 이상)"
+                    )
+                else:
+                    msg = "좋아요 👍 주요 고객층은 어떤 연령대인가요? (20대 / 30~40대 / 50대 이상)"
             else:
                 msg = "마지막으로, 고객 유형은 어떤 편인가요? (쉼표로 구분: 재방문, 신규, 직장인, 유동, 거주)"
             add_message("assistant", msg + BUTTON_HINT)
